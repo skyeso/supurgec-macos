@@ -259,29 +259,33 @@ struct UninstallerView: View {
         GlassCard(padding: 18) {
             if let app = model.selectedApp {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack(alignment: .top, spacing: 14) {
-                        if let icon = app.icon {
-                            Image(nsImage: icon)
-                                .resizable()
-                                .frame(width: 58, height: 58)
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Text(app.name)
-                                    .font(.system(size: 21, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.white)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                RevealInFinderButton(url: app.url)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .center, spacing: 14) {
+                            if let icon = app.icon {
+                                Image(nsImage: icon)
+                                    .resizable()
+                                    .frame(width: 56, height: 56)
                             }
-                            Text(app.bundleID.isEmpty ? app.url.path : app.bundleID)
-                                .font(.system(size: 11.5, design: .monospaced))
-                                .foregroundStyle(Theme.subtleText)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text("Toplam Boyut: \(((app.size ?? 0) + model.leftoversSelectedSize).formattedBytes)")
-                                .font(.system(size: 12.5, weight: .semibold))
-                                .foregroundStyle(colors[0])
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 8) {
+                                    Text(app.name)
+                                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(2)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    RevealInFinderButton(url: app.url)
+                                }
+                                Text(app.bundleID.isEmpty ? app.url.path : app.bundleID)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundStyle(Theme.subtleText)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text("Toplam Boyut: \(((app.size ?? 0) + model.leftoversSelectedSize).formattedBytes)")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(colors[0])
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        Spacer(minLength: 8)
 
                         Picker("", selection: $mode) {
                             ForEach(ActionMode.allCases, id: \.self) { m in
@@ -289,7 +293,8 @@ struct UninstallerView: View {
                             }
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 230)
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity)
                     }
 
                     Divider().overlay(Color.white.opacity(0.10))
