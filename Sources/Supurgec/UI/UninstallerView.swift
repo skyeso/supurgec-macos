@@ -1,31 +1,6 @@
 import SwiftUI
 import AppKit
 
-extension UninstallerModel {
-    /// Uygulamayı silmeden yalnızca ilişkili önbellek ve ayar dosyalarını Çöp Kutusu'na taşır.
-    func resetSelectedLeftovers(for app: AppInfo) async {
-        let targets = leftovers.filter(\.selected)
-        guard !targets.isEmpty else { return }
-        working = true
-        SystemMonitor.shared.beginTask("\(app.name) verileri sıfırlanıyor…", gpuAnimated: true)
-        defer {
-            working = false
-            SystemMonitor.shared.endTask("✓ \(app.name) sıfırlandı")
-        }
-
-        for running in NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleID) {
-            running.terminate()
-        }
-        try? await Task.sleep(for: .milliseconds(600))
-
-        let urls = targets.map(\.url)
-        let failed = await Task.detached { FileUtils.trash(urls) }.value
-        let movedBytes = targets.filter { !failed.contains($0.url) }.reduce(Int64(0)) { $0 + $1.size }
-        message = "\(app.name) sıfırlandı · \(movedBytes.formattedBytes) artık veri Çöp Kutusu'na taşındı."
-        await select(app)
-    }
-}
-
 struct UninstallerView: View {
     enum Filter: String, CaseIterable {
         case all = "Tümü"
@@ -42,6 +17,7 @@ struct UninstallerView: View {
     @ObservedObject var model: UninstallerModel
     @ViewState private var filter: Filter = .user
     @ViewState private var mode: ActionMode = .uninstall
+    @ViewState private var confirmPermanent = false
 
     private let colors = NavModule.uninstaller.accentColors
 
@@ -106,7 +82,7 @@ struct UninstallerView: View {
                     Text("Uygulama Kaldırıcı")
                         .font(.system(size: 22, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("\(displayedApps.count) uygulama listeleniyor")
+                    Text("\(displayedApps.count) uygulama listeleniyor · Derin kalıntı taraması aktif")
                         .font(.system(size: 12.5))
                         .foregroundStyle(Theme.subtleText)
                 }
@@ -165,6 +141,13 @@ struct UninstallerView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
+
+                Toggle(isOn: $model.permanentDelete) {
+                    Text("Çöp Kutusu'nu atla (Kalıcı sil)")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(model.permanentDelete ? .pink : Theme.subtleText)
+                }
+                .toggleStyle(.checkbox)
             }
         }
     }
@@ -253,7 +236,7 @@ struct UninstallerView: View {
         .frame(width: 315)
     }
 
-    // MARK: - Sağ Ayrıntı & Artık Dosya Paneli
+    // MARK: - Sağ Ayrıntı & Derin Kalıntı Paneli
 
     private var detailPane: some View {
         GlassCard(padding: 18) {
@@ -280,8 +263,8 @@ struct UninstallerView: View {
                                     .foregroundStyle(Theme.subtleText)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
-                                Text("Toplam Boyut: \(((app.size ?? 0) + model.leftoversSelectedSize).formattedBytes)")
-                                    .font(.system(size: 12.5, weight: .semibold))
+                                Text("Toplam Boyut: \(((app.size ?? 0) + model.leftoversSelectedSize).formattedBytes) (\(model.leftovers.count) kalıntı konumu bulundu)")
+                                    .font(.system(size: 12, weight: .semibold))
                                     .foregroundStyle(colors[0])
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -300,9 +283,9 @@ struct UninstallerView: View {
                     Divider().overlay(Color.white.opacity(0.10))
 
                     Text(mode == .uninstall
-                         ? "Uygulama paketi ve aşağıda işaretli tüm destek ve önbellek dosyaları Çöp Kutusu'na taşınır:"
-                         : "Uygulamanın kendisi korunur; yalnızca seçili önbellek ve tercih dosyaları sıfırlanır:")
-                        .font(.system(size: 12.5))
+                         ? "Uygulama kapatılır, arka plan servisleri durdurulur, tercih önbelleği sıfırlanır ve seçili tüm dosyalar silinir:"
+                         : "Uygulamanın kendisi korunur; yalnızca seçili önbellek, servis ve ayar dosyaları sıfırlanır:")
+                        .font(.system(size: 12))
                         .foregroundStyle(Theme.subtleText)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -315,7 +298,7 @@ struct UninstallerView: View {
                                     .font(.system(size: 13, weight: .semibold))
                                     .foregroundStyle(.white)
                                     .fixedSize(horizontal: false, vertical: true)
-                                Text(mode == .uninstall ? "Uygulama Paketi" : "Korunacak")
+                                Text(mode == .uninstall ? "Ana Uygulama Paketi" : "Korunacak")
                                     .font(.system(size: 10.5, weight: .semibold))
                                     .padding(.horizontal, 7)
                                     .padding(.vertical, 2)
@@ -333,13 +316,13 @@ struct UninstallerView: View {
                             if model.findingLeftovers {
                                 HStack(spacing: 8) {
                                     ProgressView().controlSize(.small)
-                                    Text("~/Library içindeki kalıntılar aranıyor…")
+                                    Text("~/Library, /Library, arka plan servisleri ve kurulum kayıtları taranıyor…")
                                         .font(.system(size: 12.5))
                                         .foregroundStyle(Theme.subtleText)
                                 }
                                 .padding(.top, 16)
                             } else if model.leftovers.isEmpty {
-                                Text("~/Library altında ek kalıntı dosya bulunamadı.")
+                                Text("Ek kalıntı dosya veya arka plan servisi bulunamadı.")
                                     .font(.system(size: 12.5))
                                     .foregroundStyle(Theme.faintText)
                                     .padding(.top, 16)
@@ -349,10 +332,25 @@ struct UninstallerView: View {
                                     HStack(spacing: 10) {
                                         RoundCheckbox(isOn: $model.leftovers[i].selected, accent: colors[0])
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(item.name)
-                                                .font(.system(size: 12.5, weight: .medium))
-                                                .foregroundStyle(.white)
-                                                .fixedSize(horizontal: false, vertical: true)
+                                            HStack(spacing: 6) {
+                                                Text(item.name)
+                                                    .font(.system(size: 12.5, weight: .medium))
+                                                    .foregroundStyle(.white)
+                                                    .lineLimit(1)
+                                                    .truncationMode(.middle)
+                                                Text(item.kind)
+                                                    .font(.system(size: 10, weight: .semibold))
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 1.5)
+                                                    .background(Capsule().fill(colors[0].opacity(0.18)))
+                                                    .foregroundStyle(colors[0])
+                                                if item.requiresAdmin {
+                                                    Image(systemName: "key.fill")
+                                                        .font(.system(size: 9))
+                                                        .foregroundStyle(Theme.faintText)
+                                                        .help("Sistem dizininde — yönetici izni gerektirir")
+                                                }
+                                            }
                                             Text(item.url.deletingLastPathComponent().path.replacingOccurrences(of: FileUtils.home.path, with: "~"))
                                                 .font(.system(size: 10.5))
                                                 .foregroundStyle(Theme.faintText)
@@ -384,19 +382,37 @@ struct UninstallerView: View {
                         Spacer()
                         OrbActionButton(
                             title: mode == .uninstall ? "Kaldır" : "Sıfırla",
-                            colors: colors,
+                            colors: model.permanentDelete ? [Color.red, Color.pink, colors[2]] : colors,
                             isBusy: model.working,
                             isDisabled: (mode == .reset && model.leftoversSelectedSize == 0) || (mode == .uninstall && app.isSIPProtected)
                         ) {
-                            Task {
-                                if mode == .uninstall {
-                                    await model.uninstall(app)
-                                } else {
-                                    await model.resetSelectedLeftovers(for: app)
+                            if model.permanentDelete {
+                                confirmPermanent = true
+                            } else {
+                                Task {
+                                    if mode == .uninstall {
+                                        await model.uninstall(app, permanently: false)
+                                    } else {
+                                        await model.resetSelectedLeftovers(for: app, permanently: false)
+                                    }
                                 }
                             }
                         }
                         Spacer()
+                    }
+                    .alert("Kalıcı Olarak Silinsin mi?", isPresented: $confirmPermanent) {
+                        Button("Vazgeç", role: .cancel) {}
+                        Button("Evet, Kalıcı Olarak Yok Et", role: .destructive) {
+                            Task {
+                                if mode == .uninstall {
+                                    await model.uninstall(app, permanently: true)
+                                } else {
+                                    await model.resetSelectedLeftovers(for: app, permanently: true)
+                                }
+                            }
+                        }
+                    } message: {
+                        Text("\(app.name) ve seçili tüm sistem kalıntıları Çöp Kutusu'na uğramadan kalıcı olarak silinecek. Bu işlem geri alınamaz.")
                     }
                 }
             } else {
@@ -407,13 +423,13 @@ struct UninstallerView: View {
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("Süpürgeç, seçtiğiniz uygulamanın ~/Library altındaki tüm gizli önbellek, kapsayıcı ve tercih dosyalarını otomatik bulur.")
+                    Text("Süpürgeç; ~/Library, sistem /Library dizinleri, arka plan servisleri, yetkili yardımcılar ve kurulum fişleri dahil 24 ayrı noktayı tarayarak tek bir kalıntı bırakmaz.")
                         .font(.system(size: 13.5))
                         .foregroundStyle(Theme.subtleText)
                         .lineSpacing(3)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: 420)
+                        .frame(maxWidth: 440)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
