@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import Carbon
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSWindowDelegate {
@@ -11,8 +12,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     private var mainWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
 
+    /// Hem --background argümanını hem de macOS'un oturum açılışında gönderdiği
+    /// resmi keyAELaunchedAsLogInItem ('lgit') AppleEvent bayrağını algılar.
     private var launchedSilentlyInBackground: Bool {
-        CommandLine.arguments.contains("--background")
+        if CommandLine.arguments.contains("--background") {
+            return true
+        }
+        if let event = NSAppleEventManager.shared().currentAppleEvent,
+           event.eventID == kAEOpenApplication,
+           let prop = event.paramDescriptor(forKeyword: keyAEPropData),
+           prop.enumCodeValue == keyAELaunchedAsLogInItem {
+            return true
+        }
+        return false
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -45,11 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
 
         setupMainMenu()
 
-        if UserDefaults.standard.object(forKey: "login.initialized") == nil {
-            UserDefaults.standard.set(true, forKey: "login.initialized")
-            LaunchAtLoginService.setEnabled(true)
-        } else if LaunchAtLoginService.isEnabled {
-            // Güncel AssociatedBundleIdentifiers yapısını her zaman koru
+        LaunchAtLoginService.removeLegacyPlistIfPresent()
+        if UserDefaults.standard.object(forKey: "login.sm.initialized") == nil {
+            UserDefaults.standard.set(true, forKey: "login.sm.initialized")
             LaunchAtLoginService.setEnabled(true)
         }
 
