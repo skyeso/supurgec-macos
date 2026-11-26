@@ -2,6 +2,7 @@ import Foundation
 
 enum LaunchAtLoginService {
     static let label = "com.eso.supurgec.menubar"
+    static let bundleID = "com.eso.supurgec"
 
     static var plistURL: URL {
         FileUtils.library
@@ -27,8 +28,11 @@ enum LaunchAtLoginService {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         if enabled {
+            // AssociatedBundleIdentifiers sayesinde macOS "Oturum Açma Öğeleri" listesinde
+            // ayrı bir siyah terminal ikonu ("Supurgec") oluşmaz; tek "Süpürgeç" uygulaması altında görünür!
             let dict: [String: Any] = [
                 "Label": label,
+                "AssociatedBundleIdentifiers": [bundleID],
                 "ProgramArguments": [preferredExecutablePath, "--background"],
                 "RunAtLoad": true,
                 "ProcessType": "Interactive"
@@ -42,6 +46,8 @@ enum LaunchAtLoginService {
                 return false
             }
         } else {
+            let uid = getuid()
+            _ = Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)", plistURL.path])
             do {
                 if FileManager.default.fileExists(atPath: plistURL.path) {
                     try FileManager.default.removeItem(at: plistURL)

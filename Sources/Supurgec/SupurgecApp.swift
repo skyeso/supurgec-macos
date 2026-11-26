@@ -4,6 +4,8 @@ import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSWindowDelegate {
+    static let showMainNotification = Notification.Name("com.eso.supurgec.showMainWindow")
+
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
     private var mainWindow: NSWindow?
@@ -14,13 +16,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Çift örnek (iki menü çubuğu ikonu) oluşmasını engelle
+        // Zaten çalışan bir Süpürgeç örneği varsa ona "ana pencereyi aç" sinyali gönder ve ikincil kopyayı kapat
         if let bundleID = Bundle.main.bundleIdentifier {
             let me = ProcessInfo.processInfo.processIdentifier
             let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
                 .filter { $0.processIdentifier != me }
             if let existing = others.first {
                 if !launchedSilentlyInBackground {
+                    DistributedNotificationCenter.default().postNotificationName(
+                        Self.showMainNotification,
+                        object: nil,
+                        userInfo: nil,
+                        deliverImmediately: true
+                    )
                     existing.activate(options: [.activateAllWindows])
                 }
                 NSApp.terminate(nil)
@@ -28,21 +36,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             }
         }
 
-        // İlk kurulumda oturum açılışında üst barda başlatmayı varsayılan olarak etkinleştir
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(handleExternalShowRequest(_:)),
+            name: Self.showMainNotification,
+            object: nil
+        )
+
+        setupMainMenu()
+
         if UserDefaults.standard.object(forKey: "login.initialized") == nil {
             UserDefaults.standard.set(true, forKey: "login.initialized")
+            LaunchAtLoginService.setEnabled(true)
+        } else if LaunchAtLoginService.isEnabled {
+            // Güncel AssociatedBundleIdentifiers yapısını her zaman koru
             LaunchAtLoginService.setEnabled(true)
         }
 
         setupStatusBarItem()
 
         if launchedSilentlyInBackground {
-            // Bilgisayar açılışında: Pencere açma, Dock'ta gösterme — yalnızca üst barda çalış!
             NSApp.setActivationPolicy(.accessory)
         } else {
-            // Kullanıcı uygulamaya kendisi tıkladığında: Ana pencereyi ve Dock ikonunu aç
             showMainWindow()
         }
+    }
+
+    @objc private func handleExternalShowRequest(_ note: Notification) {
+        showMainWindow()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -50,13 +71,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            showMainWindow()
-        }
+        // Spotlight, Finder veya Uygulamalar'dan tıklandığında her zaman gerçek Süpürgeç penceresini aç!
+        showMainWindow()
         return true
     }
 
-    // MARK: - Ana Pencere Yönetimi (Dock Gizleme & Bellek Tasarrufu)
+    // MARK: - Standart macOS Menü Çubuğu (Cmd+Q, Cmd+W, Cmd+C/V/A, Cmd+,)
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        // 1. Uygulama Menüsü (Süpürgeç)
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+
+        let settingsItem = NSMenuItem(title: "Ayarlar…", action: #selector(openSettingsMenuAction), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+        appMenu.addItem(.separator())
+
+        let hideItem = NSMenuItem(title: "Süpürgeç'i Gizle", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(hideItem)
+
+        let closeItem = NSMenuItem(title: "Pencereyi Kapat", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        appMenu.addItem(closeItem)
+        appMenu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "Süpürgeç'ten Çık", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(quitItem)
+
+        // 2. Düzen Menüsü (Arama kutularında Kopyala/Yapıştır/Tümünü Seç kısayolları için)
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Düzen")
+        editMenuItem.submenu = editMenu
+        editMenu.addItem(withTitle: "Geri Al", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Yinele", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Kes", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Kopyala", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Yapıştır", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Tümünü Seç", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func openSettingsMenuAction() {
+        showMainWindow(navigatingTo: .settings)
+    }
+
+    // MARK: - Ana Pencere Yönetimi (Asla Boş Gri Settings Penceresi Açmaz!)
 
     func showMainWindow(navigatingTo module: NavModule? = nil) {
         NSApp.setActivationPolicy(.regular)
@@ -94,7 +160,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
 
     func windowWillClose(_ notification: Notification) {
         guard let closed = notification.object as? NSWindow, closed === mainWindow else { return }
-        // Kırmızı çarpıya (veya Cmd+W) basıldığında pencereyi bellekten düşür ve Dock'tan gizle!
         mainWindow?.contentViewController = nil
         mainWindow = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -203,23 +268,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
 }
 
 @main
-struct SupurgecApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-
-    var body: some Scene {
-        // Settings sahnesi sayesinde SwiftUI açılışta zorla pencere oluşturmaz;
-        // pencere açılışı tamamen AppDelegate (--background kontrolü) tarafından yönetilir!
-        Settings {
-            EmptyView()
-        }
-        .commands {
-            CommandGroup(replacing: .newItem) {}
-            CommandGroup(replacing: .appSettings) {
-                Button("Ayarlar…") {
-                    appDelegate.showMainWindow(navigatingTo: .settings)
-                }
-                .keyboardShortcut(",", modifiers: .command)
-            }
-        }
+enum SupurgecMain {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.run()
     }
 }
