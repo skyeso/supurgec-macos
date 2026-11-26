@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         setupStatusBarItem()
+        observeWindowClosing()
         configureWindows()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             self.configureWindows()
@@ -20,11 +21,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Ana pencere kapatıldığında uygulama kapanmaz; üst barda çalışmaya devam eder.
         false
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Uygulamalar veya Spotlight'tan tekrar tıklandığında pencereyi geri aç ve Dock'ta göster.
+        if !flag {
+            showMainWindow()
+        }
+        return true
+    }
+
+    private func isMainAppWindow(_ window: NSWindow) -> Bool {
+        guard !(window is NSPanel) else { return false }
+        let cls = window.className
+        if cls.contains("StatusBar") || cls.contains("Popover") || cls.contains("MenuBar") {
+            return false
+        }
+        return true
+    }
+
+    private func observeWindowClosing() {
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let closedWindow = note.object as? NSWindow else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.isMainAppWindow(closedWindow) else { return }
+                // Pencere kapandıktan hemen sonra görünür başka ana pencere kalmadıysa Dock'tan gizle!
+                try? await Task.sleep(for: .milliseconds(80))
+                let anyMainVisible = NSApp.windows.contains { $0.isVisible && self.isMainAppWindow($0) }
+                if !anyMainVisible {
+                    NSApp.setActivationPolicy(.accessory)
+                }
+            }
+        }
+    }
+
     func configureWindows() {
-        for window in NSApp.windows where !(window is NSPanel) && window.className != "NSStatusBarWindow" {
+        for window in NSApp.windows where isMainAppWindow(window) {
             window.appearance = NSAppearance(named: .darkAqua)
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
@@ -125,7 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func showMainWindow(navigatingTo module: NavModule? = nil) {
-        if let existing = NSApp.windows.first(where: { !($0 is NSPanel) && $0.className != "NSStatusBarWindow" && $0.canBecomeMain }) {
+        // Ana pencere açılırken uygulamayı tekrar Dock'ta görünür (.regular) yap!
+        NSApp.setActivationPolicy(.regular)
+
+        if let existing = NSApp.windows.first(where: { isMainAppWindow($0) && $0.canBecomeMain }) {
             configureWindows()
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -136,6 +177,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             openMainWindowHandler?()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
                 self.configureWindows()
+                if let win = NSApp.windows.first(where: { self.isMainAppWindow($0) }) {
+                    win.makeKeyAndOrderFront(nil)
+                }
                 NSApp.activate(ignoringOtherApps: true)
                 if let module {
                     NotificationCenter.default.post(name: .navigateToModule, object: module)
