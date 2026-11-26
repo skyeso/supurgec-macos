@@ -17,6 +17,7 @@ struct AppInfo: Identifiable, Equatable {
     let bundleID: String
     let version: String
     let privilegedHelpers: [String]
+    let embeddedBundleIDs: [String]
     let isSystem: Bool
     let isSIPProtected: Bool
     var size: Int64?
@@ -28,22 +29,68 @@ struct AppInfo: Identifiable, Equatable {
 
 @MainActor
 final class UninstallerModel: ObservableObject {
+    static let lsregisterPath = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
     @Published var apps: [AppInfo] = []
     @Published var loading = false
     @Published var search = ""
+
+    /// Sağ panelde incelenen tekil uygulama
     @Published var selectedID: String?
-    @Published var leftovers: [LeftoverItem] = []
-    @Published var findingLeftovers = false
+    /// Çoklu seçim kutucuğu işaretlenmiş uygulamalar
+    @Published var checkedIDs: Set<String> = []
+    /// Her uygulama için bulunan kalıntıların önbelleği
+    @Published var leftoversByApp: [String: [LeftoverItem]] = [:]
+    @Published var scanningAppIDs: Set<String> = []
+
     @Published var working = false
-    @Published var permanentDelete = false
+    /// Varsayılan olarak kalıcı ve kökten yok etme AÇIK (Çöp Kutusu'nda bekleyen uygulama Oturum Açma Öğeleri'nde iz bırakabildiği için!)
+    @Published var permanentDelete = true
     @Published var message: String?
 
     var filtered: [AppInfo] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
         return q.isEmpty ? apps : apps.filter { $0.name.lowercased().contains(q) || $0.bundleID.lowercased().contains(q) }
     }
+
     var selectedApp: AppInfo? { apps.first { $0.id == selectedID } }
-    var leftoversSelectedSize: Int64 { leftovers.reduce(0) { $0 + ($1.selected ? $1.size : 0) } }
+
+    var checkedApps: [AppInfo] {
+        apps.filter { checkedIDs.contains($0.id) && !$0.isSIPProtected }
+    }
+
+    /// Kaldırılacak hedef uygulamalar: Çoklu seçim varsa işaretliler, yoksa sağda açık olan uygulama.
+    var activeTargetApps: [AppInfo] {
+        if !checkedApps.isEmpty { return checkedApps }
+        if let s = selectedApp, !s.isSIPProtected { return [s] }
+        return []
+    }
+
+    func leftovers(for appID: String) -> [LeftoverItem] {
+        leftoversByApp[appID] ?? []
+    }
+
+    func leftoversSelectedSize(for appID: String) -> Int64 {
+        leftovers(for: appID).reduce(0) { $0 + ($1.selected ? $1.size : 0) }
+    }
+
+    var batchTotalSize: Int64 {
+        activeTargetApps.reduce(Int64(0)) { acc, app in
+            acc + (app.size ?? 0) + leftoversSelectedSize(for: app.id)
+        }
+    }
+
+    var batchLeftoverCount: Int {
+        activeTargetApps.reduce(0) { $0 + leftovers(for: $1.id).filter(\.selected).count }
+    }
+
+    func toggleLeftover(appID: String, index: Int) {
+        guard var list = leftoversByApp[appID], list.indices.contains(index) else { return }
+        list[index].selected.toggle()
+        leftoversByApp[appID] = list
+    }
+
+    // MARK: - Uygulama Listeleme ve Seçim
 
     func load() async {
         loading = true
@@ -62,99 +109,146 @@ final class UninstallerModel: ObservableObject {
 
     func select(_ app: AppInfo) async {
         selectedID = app.id
-        leftovers = []
-        findingLeftovers = true
-        SystemMonitor.shared.beginTask("\(app.name) tüm sistem kalıntıları aranıyor…")
+        await ensureLeftoversScanned(for: app)
+    }
+
+    func toggleCheck(_ app: AppInfo) {
+        guard !app.isSIPProtected else { return }
+        if checkedIDs.contains(app.id) {
+            checkedIDs.remove(app.id)
+        } else {
+            checkedIDs.insert(app.id)
+            if selectedID == nil { selectedID = app.id }
+            Task { await ensureLeftoversScanned(for: app) }
+        }
+    }
+
+    func clearSelection() {
+        checkedIDs.removeAll()
+    }
+
+    func ensureLeftoversScanned(for app: AppInfo) async {
+        if leftoversByApp[app.id] != nil || scanningAppIDs.contains(app.id) { return }
+        scanningAppIDs.insert(app.id)
+        SystemMonitor.shared.beginTask("\(app.name) tüm sistem kalıntıları taranıyor…")
         let allAppsSnapshot = apps
         let found = await Task.detached(priority: .userInitiated) {
             Self.findLeftovers(app: app, allInstalledApps: allAppsSnapshot)
         }.value
+        leftoversByApp[app.id] = found
+        scanningAppIDs.remove(app.id)
         SystemMonitor.shared.endTask()
-        guard selectedID == app.id else { return }
-        leftovers = found
-        findingLeftovers = false
     }
 
-    /// Derin Kaldırma: Ana uygulama + alt süreçler + arka plan servisleri + tercih önbelleği + kurulum kayıtları + tüm dosyalar!
-    func uninstall(_ app: AppInfo, permanently: Bool) async {
-        if app.isSIPProtected {
-            message = "\(app.name) macOS tarafından korunuyor (SIP). 'Uygulamayı Sıfırla' moduyla verilerini temizleyebilirsiniz."
-            return
-        }
+    // MARK: - Tekli veya Çoklu Kökten Yok Etme Motoru
+
+    func uninstallApps(_ targetApps: [AppInfo], permanently: Bool) async {
+        let removable = targetApps.filter { !$0.isSIPProtected }
+        guard !removable.isEmpty else { return }
+
         working = true
-        SystemMonitor.shared.beginTask("\(app.name) ve tüm kalıntıları kaldırılıyor…", gpuAnimated: true)
+        let labelText = removable.count == 1 ? removable[0].name : "\(removable.count) uygulama"
+        SystemMonitor.shared.beginTask("\(labelText) kökten kaldırılıyor…", gpuAnimated: true)
         defer {
             working = false
-            SystemMonitor.shared.endTask("✓ \(app.name) tamamen kaldırıldı")
+            SystemMonitor.shared.endTask("✓ \(labelText) tamamen yok edildi")
         }
 
-        // 1. Açık olan ana uygulamayı ve içindeki tüm yardımcı (Helper) süreçleri tamamen kapat
-        await terminateAppAndHelpers(app)
-
-        let selectedLeftovers = leftovers.filter(\.selected)
-
-        // 2. Kullanıcı LaunchAgent servislerini çalışırken durdur (tekrar dosya üretmesin)
-        for item in selectedLeftovers where !item.requiresAdmin && item.url.path.contains("/LaunchAgents/") {
-            _ = await Task.detached { Shell.run("/bin/launchctl", ["unload", "-w", item.url.path]) }.value
+        // Kalıntıları henüz taranmamış seçili uygulama varsa önce tara
+        for app in removable where leftoversByApp[app.id] == nil {
+            let snap = apps
+            let found = await Task.detached(priority: .userInitiated) {
+                Self.findLeftovers(app: app, allInstalledApps: snap)
+            }.value
+            leftoversByApp[app.id] = found
         }
 
-        // 3. macOS cfprefsd RAM tercih önbelleğini temizle (silinen plist geri yazılmasın)
-        if !app.bundleID.isEmpty {
-            let bid = app.bundleID
-            _ = await Task.detached { Shell.run("/usr/bin/defaults", ["delete", bid]) }.value
-        }
+        var totalFreed: Int64 = 0
+        var totalRemovedLeftovers = 0
+        var needAdminDeleteURLs: [URL] = []
+        var needAdminBootoutPlists: [URL] = []
+        var receiptPkgIDs: Set<String> = []
+        let uid = getuid()
 
-        // 4. Arka plan servis plist dosyaları Çöp Kutusu'na taşınırsa veya yerinde kalırsa macOS
-        // "Oturum Açma Öğeleri" listesinde görünmeye devam edebilir; bu yüzden plist servislerini doğrudan kaldır.
-        let servicePlists = selectedLeftovers.filter {
-            $0.url.path.contains("/LaunchAgents/") || $0.url.path.contains("/LaunchDaemons/")
-        }
-        let regularLeftovers = selectedLeftovers.filter {
-            !$0.url.path.contains("/LaunchAgents/") && !$0.url.path.contains("/LaunchDaemons/")
-        }
+        for app in removable {
+            let appLeftovers = leftovers(for: app.id).filter(\.selected)
+            totalFreed += (app.size ?? 0) + appLeftovers.reduce(0) { $0 + $1.size }
+            totalRemovedLeftovers += appLeftovers.count
 
-        let allTargets = [app.url] + regularLeftovers.map(\.url)
-        var needAdminURLs: [URL] = []
+            // 1. Ana uygulamayı ve paket içinden çalışan tüm yardımcı (Helper/Daemon) süreçleri kapat
+            await terminateAppAndHelpers(app)
 
-        // Kullanıcı düzeyindeki servis plistlerini durdur ve sil
-        for sp in servicePlists {
-            if !sp.requiresAdmin {
-                _ = await Task.detached { Shell.run("/bin/launchctl", ["unload", "-w", sp.url.path]) }.value
-                do { try FileManager.default.removeItem(at: sp.url) }
-                catch { needAdminURLs.append(sp.url) }
+            // 2. Silmeden ÖNCE ana uygulamayı, gömülü LoginItems paketlerini ve Çöp'teki eski .app kopyalarını LaunchServices'ten düşür!
+            let loginItemsDir = app.url.appendingPathComponent("Contents/Library/LoginItems")
+            let embeddedLoginApps = FileUtils.children(of: loginItemsDir).filter { $0.pathExtension == "app" }
+            let leftoverApps = appLeftovers.map(\.url).filter { $0.pathExtension == "app" || $0.lastPathComponent.contains(".app") }
+            let urlsToUnregister = embeddedLoginApps + leftoverApps + [app.url]
+            let lsreg = Self.lsregisterPath
+            await Task.detached {
+                for u in urlsToUnregister {
+                    _ = Shell.run(lsreg, ["-u", u.path])
+                }
+            }.value
+
+            // 3. Tercih önbelleklerini (cfprefsd) hem ana hem gömülü bundle ID'ler için sıfırla
+            let allIDs = ([app.bundleID] + app.embeddedBundleIDs).filter { !$0.isEmpty }
+            await Task.detached {
+                for bid in allIDs {
+                    _ = Shell.run("/usr/bin/defaults", ["delete", bid])
+                }
+            }.value
+
+            // 4. Servis plistleri ve kurulum kayıtlarını ayır
+            for item in appLeftovers {
+                let p = item.url.path
+                if p.hasPrefix("/private/var/db/receipts/") || p.hasPrefix("/var/db/receipts/") {
+                    receiptPkgIDs.insert((item.url.lastPathComponent as NSString).deletingPathExtension)
+                }
+                if p.contains("/LaunchAgents/") || p.contains("/LaunchDaemons/") {
+                    if !item.requiresAdmin {
+                        _ = await Task.detached {
+                            Shell.run("/bin/launchctl", ["bootout", "gui/\(uid)", p])
+                            return Shell.run("/bin/launchctl", ["unload", "-w", p])
+                        }.value
+                        do { try FileManager.default.removeItem(at: item.url) }
+                        catch {
+                            needAdminBootoutPlists.append(item.url)
+                            needAdminDeleteURLs.append(item.url)
+                        }
+                    } else {
+                        needAdminBootoutPlists.append(item.url)
+                        needAdminDeleteURLs.append(item.url)
+                    }
+                } else {
+                    if permanently {
+                        do { try FileManager.default.removeItem(at: item.url) }
+                        catch { needAdminDeleteURLs.append(item.url) }
+                    } else {
+                        let failed = FileUtils.trash([item.url])
+                        needAdminDeleteURLs.append(contentsOf: failed)
+                    }
+                }
+            }
+
+            // 5. Ana .app paketini ve Çöp Kutusu'nda varsa eski kopyalarını yok et!
+            if permanently {
+                do { try FileManager.default.removeItem(at: app.url) }
+                catch { needAdminDeleteURLs.append(app.url) }
             } else {
-                needAdminURLs.append(sp.url)
+                let failed = FileUtils.trash([app.url])
+                needAdminDeleteURLs.append(contentsOf: failed)
             }
         }
 
-        if permanently {
-            let failed = await Task.detached { () -> [URL] in
-                var f: [URL] = []
-                for u in allTargets {
-                    do { try FileManager.default.removeItem(at: u) }
-                    catch { f.append(u) }
-                }
-                return f
-            }.value
-            needAdminURLs.append(contentsOf: failed)
-        } else {
-            let failed = await Task.detached { FileUtils.trash(allTargets) }.value
-            needAdminURLs.append(contentsOf: failed)
-        }
-
-        // 5. Sistem (/Library, LaunchDaemons, PrivilegedHelperTools, Receipts) hedefleri veya root sahipli uygulamalar için tek seferde yönetici komutu
-        let receiptPkgIDs = selectedLeftovers
-            .filter { $0.url.path.hasPrefix("/private/var/db/receipts/") || $0.url.path.hasPrefix("/var/db/receipts/") }
-            .map { ($0.url.lastPathComponent as NSString).deletingPathExtension }
-
-        if !needAdminURLs.isEmpty || !receiptPkgIDs.isEmpty {
+        // 6. Yönetici yetkisi gereken tüm dosyaları, servisleri ve Oturum Açma Öğeleri (BTM) yenilemesini TEK SEFERDE çalıştır!
+        if !needAdminDeleteURLs.isEmpty || !receiptPkgIDs.isEmpty {
             var cmds: [String] = []
-            for u in needAdminURLs where u.path.contains("/LaunchDaemons/") || u.path.contains("/LaunchAgents/") {
-                cmds.append("/bin/launchctl bootout system \(Shell.quote(u.path)) 2>/dev/null || /bin/launchctl unload -w \(Shell.quote(u.path)) 2>/dev/null || true")
+            for p in needAdminBootoutPlists {
+                cmds.append("/bin/launchctl bootout system \(Shell.quote(p.path)) 2>/dev/null || /bin/launchctl unload -w \(Shell.quote(p.path)) 2>/dev/null || true")
             }
             let trashDir = FileUtils.home.appendingPathComponent(".Trash").path
             let stamp = Int(Date().timeIntervalSince1970)
-            for (idx, u) in needAdminURLs.enumerated() {
+            for (idx, u) in needAdminDeleteURLs.enumerated() {
                 let isServicePlist = u.path.contains("/LaunchDaemons/") || u.path.contains("/LaunchAgents/")
                 if permanently || isServicePlist {
                     cmds.append("/bin/rm -rf \(Shell.quote(u.path))")
@@ -163,31 +257,48 @@ final class UninstallerModel: ObservableObject {
                     cmds.append("/bin/mv -f \(Shell.quote(u.path)) \(Shell.quote(dest)) && /usr/sbin/chown \(NSUserName()) \(Shell.quote(dest)) || true")
                 }
             }
-            for pkg in Set(receiptPkgIDs) where !pkg.isEmpty {
+            for pkg in receiptPkgIDs where !pkg.isEmpty {
                 cmds.append("/usr/sbin/pkgutil --forget \(Shell.quote(pkg)) 2>/dev/null || true")
             }
+            // Kritik adım: LaunchServices ölü paket çöp toplamasını (-gc) çalıştır ve backgroundtaskmanagementd servisini
+            // yeniden başlat ki macOS Sistem Ayarları › Oturum Açma Öğeleri silinen geliştirici kaydını anında listeden düşürsün!
+            cmds.append("\(Shell.quote(Self.lsregisterPath)) -gc >/dev/null 2>&1 || true")
+            cmds.append("/usr/bin/killall backgroundtaskmanagementd 2>/dev/null || true")
+            cmds.append("/usr/bin/killall BackgroundTaskManagementAgent 2>/dev/null || true")
+            cmds.append("/usr/bin/killall -u \(Shell.quote(NSUserName())) cfprefsd 2>/dev/null || true")
 
-            if !cmds.isEmpty {
-                _ = Shell.runAsAdmin(cmds.joined(separator: "; "))
-                needAdminURLs = needAdminURLs.filter { FileUtils.exists($0) }
-            }
+            _ = Shell.runAsAdmin(cmds.joined(separator: "; "))
+        } else {
+            // Kullanıcı düzeyinde de LaunchServices çöp toplamasını (-gc) ve arka plan görev önbelleğini tazele
+            let lsreg = Self.lsregisterPath
+            _ = await Task.detached {
+                _ = Shell.run(lsreg, ["-gc"])
+                _ = Shell.run("/usr/bin/killall", ["BackgroundTaskManagementAgent"])
+                _ = Shell.run("/usr/bin/killall", ["cfprefsd"])
+            }.value
         }
 
-        if FileUtils.exists(app.url) {
-            message = "\(app.name) kaldırılamadı (işlem iptal edildi veya dosya kilitli)."
-        } else {
-            let freed = (app.size ?? 0) + leftoversSelectedSize
-            let actionWord = permanently ? "kalıcı olarak silindi" : "Çöp Kutusu'na taşındı"
-            message = "\(app.name) ve \(selectedLeftovers.count) kalıntı parçası (\(freed.formattedBytes)) \(actionWord)."
+        // Kaldırılanları listeden düşür
+        var removedCount = 0
+        for app in removable where !FileUtils.exists(app.url) {
+            removedCount += 1
             apps.removeAll { $0.id == app.id }
-            selectedID = nil
-            leftovers = []
+            checkedIDs.remove(app.id)
+            leftoversByApp.removeValue(forKey: app.id)
+            if selectedID == app.id { selectedID = nil }
+        }
+
+        if removedCount == 0 {
+            message = "Kaldırma işlemi tamamlanamadı veya iptal edildi."
+        } else {
+            let modeWord = permanently ? "kökten yok edildi" : "Çöp Kutusu'na taşındı"
+            message = "\(removedCount) uygulama ve \(totalRemovedLeftovers) sistem kalıntısı (\(totalFreed.formattedBytes)) \(modeWord)."
         }
     }
 
     /// Uygulamayı silmeden yalnızca ilişkili önbellek ve ayar dosyalarını sıfırlar.
     func resetSelectedLeftovers(for app: AppInfo, permanently: Bool) async {
-        let targets = leftovers.filter(\.selected)
+        let targets = leftovers(for: app.id).filter(\.selected)
         guard !targets.isEmpty else { return }
         working = true
         SystemMonitor.shared.beginTask("\(app.name) verileri sıfırlanıyor…", gpuAnimated: true)
@@ -217,41 +328,47 @@ final class UninstallerModel: ObservableObject {
         }
 
         if !failed.isEmpty {
-            let cmds = failed.map { permanently ? "/bin/rm -rf \(Shell.quote($0.path))" : "/bin/rm -rf \(Shell.quote($0.path))" }
+            let cmds = failed.map { "/bin/rm -rf \(Shell.quote($0.path))" }
             _ = Shell.runAsAdmin(cmds.joined(separator: "; "))
             failed = failed.filter { FileUtils.exists($0) }
         }
 
         let movedBytes = targets.filter { !failed.contains($0.url) }.reduce(Int64(0)) { $0 + $1.size }
         message = "\(app.name) sıfırlandı · \(movedBytes.formattedBytes) veri temizlendi."
-        await select(app)
+        leftoversByApp.removeValue(forKey: app.id)
+        await ensureLeftoversScanned(for: app)
     }
 
     private func terminateAppAndHelpers(_ app: AppInfo) async {
-        if !app.bundleID.isEmpty {
-            for running in NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleID) {
+        let allIDs = [app.bundleID] + app.embeddedBundleIDs
+        for bid in allIDs where !bid.isEmpty {
+            for running in NSRunningApplication.runningApplications(withBundleIdentifier: bid) {
                 running.terminate()
             }
         }
         let appPathPrefix = app.url.path + "/"
+        let helperNames = Set(app.privilegedHelpers)
         await Task.detached {
             let out = Shell.run("/bin/ps", ["-axo", "pid=,comm="]).output
             var pids: [Int32] = []
             for line in out.split(separator: "\n") {
                 let parts = line.trimmingCharacters(in: .whitespaces).split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-                if parts.count == 2, let pid = Int32(parts[0]), String(parts[1]).hasPrefix(appPathPrefix) {
+                guard parts.count == 2, let pid = Int32(parts[0]) else { continue }
+                let comm = String(parts[1])
+                let base = (comm as NSString).lastPathComponent
+                if comm.hasPrefix(appPathPrefix) || helperNames.contains(base) {
                     pids.append(pid)
                     Darwin.kill(pid, SIGTERM)
                 }
             }
             if !pids.isEmpty {
-                usleep(550_000)
+                usleep(500_000)
                 for pid in pids { Darwin.kill(pid, SIGKILL) }
             }
         }.value
     }
 
-    // MARK: - Uygulama ve Derin Kalıntı Tarayıcısı
+    // MARK: - Uygulama ve 28 Noktalı Derin Kalıntı Tarayıcısı
 
     nonisolated static func findApps() -> [AppInfo] {
         let dirs = [
@@ -273,7 +390,21 @@ final class UninstallerModel: ObservableObject {
             let bundleID = bundle?.bundleIdentifier ?? ""
             let rawDisplay = FileManager.default.displayName(atPath: u.path).replacingOccurrences(of: ".app", with: "")
             let version = info["CFBundleShortVersionString"] as? String ?? ""
-            let helpers = (info["SMPrivilegedExecutables"] as? [String: Any]).map { Array($0.keys) } ?? []
+
+            var helpers = (info["SMPrivilegedExecutables"] as? [String: Any]).map { Array($0.keys) } ?? []
+            let launchSvcDir = u.appendingPathComponent("Contents/Library/LaunchServices")
+            for h in FileUtils.children(of: launchSvcDir) {
+                helpers.append(h.lastPathComponent)
+            }
+
+            var embeddedIDs: [String] = []
+            let loginItemsDir = u.appendingPathComponent("Contents/Library/LoginItems")
+            for li in FileUtils.children(of: loginItemsDir) where li.pathExtension == "app" {
+                if let bid = Bundle(url: li)?.bundleIdentifier, !bid.isEmpty {
+                    embeddedIDs.append(bid)
+                }
+            }
+
             let inSystemPath = u.path.hasPrefix("/System/")
             let isApple = inSystemPath || bundleID.hasPrefix("com.apple.")
             result.append(AppInfo(
@@ -281,7 +412,8 @@ final class UninstallerModel: ObservableObject {
                 name: rawDisplay,
                 bundleID: bundleID,
                 version: version,
-                privilegedHelpers: helpers,
+                privilegedHelpers: Array(Set(helpers)),
+                embeddedBundleIDs: embeddedIDs,
                 isSystem: isApple,
                 isSIPProtected: inSystemPath
             ))
@@ -302,9 +434,8 @@ final class UninstallerModel: ObservableObject {
         let userLib = FileUtils.library
         let sysLib = URL(fileURLWithPath: "/Library")
 
-        // Taranacak tüm Kullanıcı (~/Library) ve Sistem (/Library + Receipts + Shared) konumları
         let locations: [(url: URL, kind: String, admin: Bool, allowVendorSubscan: Bool)] = [
-            // Kullanıcı düzeyi
+            // Kullanıcı düzeyi (~/Library)
             (userLib.appendingPathComponent("Application Support"), "Uygulama Verisi", false, true),
             (userLib.appendingPathComponent("Caches"), "Önbellek", false, true),
             (userLib.appendingPathComponent("Preferences"), "Tercih Dosyası", false, false),
@@ -318,9 +449,10 @@ final class UninstallerModel: ObservableObject {
             (userLib.appendingPathComponent("WebKit"), "WebKit Önbelleği", false, false),
             (userLib.appendingPathComponent("Cookies"), "Çerez Dosyası", false, false),
             (userLib.appendingPathComponent("Application Scripts"), "Uygulama Betiği", false, false),
+            (userLib.appendingPathComponent("Caches/com.apple.helpd/Generated"), "Yardım Önbelleği", false, false),
             (userLib.appendingPathComponent("LaunchAgents"), "Başlangıç Servisi (Kullanıcı)", false, false),
 
-            // Sistem düzeyi (/Library) — derin kurulum yapan uygulamalar için!
+            // Sistem düzeyi (/Library + Receipts + Shared)
             (sysLib.appendingPathComponent("Application Support"), "Sistem Uygulama Verisi", true, true),
             (sysLib.appendingPathComponent("Caches"), "Sistem Önbelleği", true, true),
             (sysLib.appendingPathComponent("Preferences"), "Sistem Tercihi", true, false),
@@ -329,11 +461,15 @@ final class UninstallerModel: ObservableObject {
             (sysLib.appendingPathComponent("LaunchDaemons"), "Arka Plan Sistem Servisi (Daemon)", true, false),
             (sysLib.appendingPathComponent("PrivilegedHelperTools"), "Yetkili Yardımcı Araç (Helper)", true, false),
             (sysLib.appendingPathComponent("Extensions"), "Çekirdek Uzantısı", true, false),
+            (sysLib.appendingPathComponent("StagedExtensions"), "Önbellekli Uzantı", true, false),
             (URL(fileURLWithPath: "/Users/Shared"), "Paylaşılan Klasör Verisi", true, false),
             (URL(fileURLWithPath: "/private/var/db/receipts"), "Kurulum Kaydı (Receipt)", true, false),
+            // Çöp Kutusu'nda önceden kalmış aynı uygulamaya ait kopyalar (Oturum Açma Öğeleri'nde hayalet kayıt bırakmaması için!)
+            (FileUtils.home.appendingPathComponent(".Trash"), "Çöp Kutusu'ndaki Eski Kopya", false, false),
         ]
 
         let bid = app.bundleID.lowercased()
+        let allKnownBundleIDs = Set(([bid] + app.embeddedBundleIDs.map { $0.lowercased() }).filter { $0.count > 5 })
         let appPathPrefix = app.url.path.lowercased() + "/"
         let bundleName = ((app.url.lastPathComponent as NSString).deletingPathExtension).lowercased()
         let displayName = app.name.lowercased()
@@ -341,13 +477,10 @@ final class UninstallerModel: ObservableObject {
         let normBundleName = normalizeToken(bundleName)
         let helperIDs = Set(app.privilegedHelpers.map { $0.lowercased() })
 
-        // com.vendor.Product -> vendor ("google", "brave", "cloudflare")
         let bidParts = bid.split(separator: ".").map(String.init)
         let vendorToken: String? = bidParts.count >= 2 ? bidParts[1] : nil
         let vendorPrefix: String? = bidParts.count >= 2 ? "\(bidParts[0]).\(bidParts[1])." : nil
 
-        // Bu üreticinin (örn. com.cloudflare.*) Mac'te kurulu BAŞKA bir uygulaması var mı?
-        // Başka uygulaması yoksa (örn. Cloudflare, Mullvad, BlueStacks), üretici klasörünü ve com.<vendor>.* servislerini güvenle eşleştir!
         let hasSiblingVendorApp: Bool = {
             guard let vp = vendorPrefix, let v = vendorToken, v != "apple" else { return true }
             return allInstalledApps.contains { other in
@@ -360,8 +493,6 @@ final class UninstallerModel: ObservableObject {
             "clock", "chess", "stocks", "tv", "photos", "preview", "messages", "contacts"
         ]
 
-        /// LaunchAgent / LaunchDaemon plist dosyasının İÇİNİ okuyarak hedef uygulamanın yoluna işaret edip etmediğini denetler!
-        /// Örn: com.cloudflare.warp.updater.plist -> /Applications/Cloudflare WARP.app/Contents/Resources/warp-updater
         func plistPointsToApp(_ plistURL: URL) -> Bool {
             guard plistURL.pathExtension.lowercased() == "plist",
                   let dict = NSDictionary(contentsOf: plistURL) as? [String: Any] else { return false }
@@ -377,7 +508,7 @@ final class UninstallerModel: ObservableObject {
                 if low.hasPrefix(appPathPrefix) || low == app.url.path.lowercased() {
                     return true
                 }
-                if bid.count > 5 && (low == bid || low.contains(bid)) {
+                for kbid in allKnownBundleIDs where low == kbid || low.contains(kbid) {
                     return true
                 }
                 if !hasSiblingVendorApp, let v = vendorToken, v.count >= 4, v != "apple" {
@@ -394,38 +525,33 @@ final class UninstallerModel: ObservableObject {
             let stem = (lower as NSString).deletingPathExtension
             let normStem = normalizeToken(stem)
 
-            // 1. LaunchAgent / LaunchDaemon ise plist dosyasının İÇİNDEKİ ProgramArguments yoluna bak!
             if isLaunchPlistDir && plistPointsToApp(fullURL) {
                 return true
             }
 
-            // 2. Info.plist SMPrivilegedExecutables yardımcı servis eşleşmesi
             if helperIDs.contains(lower) || helperIDs.contains(stem) {
                 return true
             }
 
-            // 3. Paket Kimliği (Bundle ID) eşleşmesi
-            if bid.count > 5 {
-                if stem == bid || lower == bid
-                    || lower.hasPrefix(bid + ".")
-                    || lower.hasPrefix(bid + "_")
-                    || lower.hasPrefix(bid + "-")
-                    || stem.hasSuffix("." + bid) {
+            for kbid in allKnownBundleIDs {
+                if stem == kbid || lower == kbid
+                    || lower.hasPrefix(kbid + ".")
+                    || lower.hasPrefix(kbid + "_")
+                    || lower.hasPrefix(kbid + "-")
+                    || stem.hasSuffix("." + kbid) {
                     return true
                 }
-                if bidParts.count >= 3 && lower.contains("." + bid) {
+                if kbid.split(separator: ".").count >= 3 && lower.contains("." + kbid) {
                     return true
                 }
             }
 
-            // 4. Tek ürünlü üretici eşleşmesi (örn. Mac'te başka com.cloudflare.* uygulaması yoksa com.cloudflare.warp.updater.plist'i de yakala!)
             if !hasSiblingVendorApp, let vp = vendorPrefix, let v = vendorToken, v.count >= 5, v != "apple" {
                 if lower.hasPrefix(vp) {
                     return true
                 }
             }
 
-            // 5. Uygulama Adı eşleşmesi
             for candidate in Set([normDisplay, normBundleName]) where candidate.count >= 4 && !genericWords.contains(candidate) {
                 if normStem == candidate {
                     return true
@@ -435,7 +561,8 @@ final class UninstallerModel: ObservableObject {
                     lower.hasPrefix(displayName + "-") ||
                     lower.hasPrefix(displayName + " ") ||
                     lower.hasPrefix(bundleName + "_") ||
-                    lower.hasPrefix(bundleName + "-")
+                    lower.hasPrefix(bundleName + "-") ||
+                    lower.hasPrefix(bundleName + ".app-")
                 ) {
                     return true
                 }
@@ -471,9 +598,6 @@ final class UninstallerModel: ObservableObject {
                     continue
                 }
 
-                // Üretici alt klasörü kontrolü:
-                // - Eğer Mac'te bu üreticinin başka uygulaması YOKSA (örn. /Library/Application Support/Cloudflare), doğrudan üretici klasörünü seç!
-                // - Başka uygulaması VARSA (örn. Google/Chrome + Google/DriveFS), yalnızca bu uygulamanın alt klasörünü seç!
                 if loc.allowVendorSubscan, let vendor = vendorToken, vendor.count >= 4, vendor != "apple",
                    FileUtils.isDirectory(child) {
                     let normFolder = normalizeToken(name.lowercased().replacingOccurrences(of: ".localized", with: ""))
@@ -505,6 +629,21 @@ final class UninstallerModel: ObservableObject {
                         }
                     }
                 }
+            }
+        }
+
+        // Ev dizinindeki gizli nokta klasörleri (örn. ~/.cloudflare-warp, ~/.cursor, ~/.bluestacks)
+        let protectedDotFolders: Set<String> = [
+            ".trash", ".ssh", ".gnupg", ".gitconfig", ".zshrc", ".zprofile", ".bashrc",
+            ".bash_profile", ".config", ".local", ".cache", ".npm", ".gradle", ".cargo",
+            ".rustup", ".pyenv", ".nvm", ".bun", ".gemini", ".claude", ".docker"
+        ]
+        for child in FileUtils.children(of: FileUtils.home) {
+            let n = child.lastPathComponent.lowercased()
+            guard n.hasPrefix("."), !protectedDotFolders.contains(n), n.count >= 5 else { continue }
+            let normDot = normalizeToken(String(n.dropFirst()))
+            if normDisplay.count >= 5 && !genericWords.contains(normDisplay) && normDot == normDisplay {
+                appendItem(child, kind: "Gizli Ev Klasörü (~/)", admin: false)
             }
         }
 

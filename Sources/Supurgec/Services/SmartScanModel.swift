@@ -31,6 +31,10 @@ final class SmartScanModel: ObservableObject {
     let optimization: OptimizationModel
     let maintenance: MaintenanceModel
 
+    var hasPasswordlessHelper: Bool {
+        FileManager.default.fileExists(atPath: Shell.sudoersPath)
+    }
+
     init(junkScanner: JunkScanner, optimization: OptimizationModel, maintenance: MaintenanceModel) {
         self.junkScanner = junkScanner
         self.optimization = optimization
@@ -47,26 +51,26 @@ final class SmartScanModel: ObservableObject {
         freedBytes = 0
         ranTasksCount = 0
 
-        // 1. Sistem Çöpü Taraması
-        currentSubtitle = "Sistem önbellekleri ve günlükler taranıyor…"
+        // 1. Sistem Çöpü ve Güvenli Uygulama İçi Önbellek Taraması
+        currentSubtitle = "Sistem önbellekleri, günlükler ve uygulama kalıntıları taranıyor…"
         SystemMonitor.shared.updateTask("Akıllı Tarama: Sistem çöpü inceleniyor…")
         await junkScanner.scan()
         cleanupState = .finished
 
         // 2. Hız & Bakım Analizi
         speedState = .active
-        currentSubtitle = "Sistem hızlandırma görevleri kontrol ediliyor…"
+        currentSubtitle = "RAM, DNS ve sistem önbellek görevleri kontrol ediliyor…"
         SystemMonitor.shared.updateTask("Akıllı Tarama: Hız görevleri denetleniyor…")
-        try? await Task.sleep(for: .milliseconds(550))
+        try? await Task.sleep(for: .milliseconds(500))
         speedState = .finished
 
         // 3. Optimizasyon & Başlangıç Öğeleri
         optState = .active
-        currentSubtitle = "Başlangıç öğeleri ve arka plan süreçleri inceleniyor…"
+        currentSubtitle = "Başlangıç servisleri ve işlemci yükü inceleniyor…"
         SystemMonitor.shared.updateTask("Akıllı Tarama: Servisler analiz ediliyor…")
         optimization.refreshLaunchAgents()
         optimization.refreshProcesses()
-        try? await Task.sleep(for: .milliseconds(550))
+        try? await Task.sleep(for: .milliseconds(500))
         optState = .finished
 
         runCleanJunk = junkScanner.selectedSize > 0
@@ -84,13 +88,21 @@ final class SmartScanModel: ObservableObject {
         var taskCount = 0
 
         if runCleanJunk && junkScanner.selectedSize > 0 {
-            currentSubtitle = "Gereksiz dosyalar temizleniyor…"
+            currentSubtitle = "Gereksiz önbellek ve günlük dosyaları temizleniyor…"
             SystemMonitor.shared.updateTask("Akıllı Bakım: Çöp dosyaları siliniyor…")
             await junkScanner.clean()
             freed = junkScanner.cleanedBytes
         }
 
         if runFlushDNSAndCache {
+            // Tek seferlik şifresiz yetki kuruluysa RAM boşaltma ve DNS sıfırlamayı da şifre sormadan çalıştır!
+            if hasPasswordlessHelper {
+                currentSubtitle = "Etkin olmayan RAM boşaltılıyor ve DNS önbelleği yenileniyor…"
+                SystemMonitor.shared.updateTask("Akıllı Bakım: RAM ve DNS tazeleniyor…")
+                if await Shell.freeRAMPasswordlessOrSetup() { taskCount += 1 }
+                if await Shell.flushDNSPasswordlessOrSetup() { taskCount += 1 }
+            }
+
             currentSubtitle = "Quick Look ve Launch Services önbellekleri yenileniyor…"
             SystemMonitor.shared.updateTask("Akıllı Bakım: Hız betikleri çalıştırılıyor…")
             let cmds = [
@@ -103,6 +115,7 @@ final class SmartScanModel: ObservableObject {
             }
         }
 
+        SystemMonitor.shared.updateFull()
         freedBytes = freed
         ranTasksCount = taskCount
         currentSubtitle = ""

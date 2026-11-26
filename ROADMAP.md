@@ -6,14 +6,15 @@ Bu dosya, geliştirme sırasında *"aklımızda bulunsun / ileride değerlendire
 
 ## Aklımızdaki Maddeler (Bekleyen Fikirler)
 
-1. **Özel Uygulama Logosu / İkon Tasarımı**
+1. **Özel Uygulama Logosu / İkon Tasarımı** *(Bekliyor)*
    - Mevcut geçici fırça ikonu yerine sıfırdan şık, 3B macOS tarzında özel bir **Süpürgeç** logosu tasarlanıp `.icns` paketinin ve GitHub/Homebrew sürümünün güncellenmesi.
 
-2. **`Application Support` İçindeki Gizli Uygulama Önbellekleri (+ Akıllı Tarama Hız Adımı)**
-   - Brave, Chrome, Discord, Spotify, Steam, Slack, VS Code gibi uygulamaların şifrelere/oturumlara/ayarlara dokunmadan yalnızca `~/Library/Application Support/<Uygulama>/` altındaki geçici `Cache`, `Code Cache`, `GPUCache`, `DawnCache` ve `Service Worker (CacheStorage)` klasörlerini cımbızla temizleme seçeneği.
-   - İsteğe bağlı olarak **Akıllı Tarama** içindeki *"Çalıştır"* adımına şifresiz **RAM Boşaltma + DNS Temizleme** eklenmesi.
+2. **`Application Support` İçindeki Gizli Uygulama Önbellekleri (+ Akıllı Tarama Hız Adımı)** *(Tamamlandı ✅)*
+   - Brave, Chrome, Discord, Spotify, Steam, Slack, VS Code gibi uygulamaların şifrelere/oturumlara/ayarlara dokunmadan yalnızca `~/Library/Application Support/<Uygulama>/` altındaki geçici `Cache`, `Code Cache`, `GPUCache`, `DawnCache` ve `Service Worker (CacheStorage)` klasörlerini cımbızla temizleme seçeneği (açık uygulamaları otomatik koruma kalkanıyla eklendi).
+   - **Akıllı Tarama** içindeki *"Çalıştır"* adımına şifresiz **RAM Boşaltma + DNS Temizleme** eklendi.
+   - *(Bonus — Tamamlandı ✅)* **Çoklu Seçmeli Kökten Kaldırıcı:** 28 noktalı derin tarama, aynı anda birden fazla uygulamayı seçip toplu silme ve `Oturum Açma Öğeleri` kalıntılarını (`lsregister -u` + `backgroundtaskmanagementd` yenilemesi + Çöp Kutusu'nda bekletmeden kalıcı imha) sıfırlama eklendi.
 
-3. **Ağ Kartı İçinde Canlı Veri Alışverişi (Uygulama Bazlı Trafik + Grafik)**
+3. **Ağ Kartı İçinde Canlı Veri Alışverişi (Uygulama Bazlı Trafik + Grafik)** *(Bekliyor)*
    - Üst bardaki **Ağ** kartına tıklandığında (boştayken `%0` ek yükle, yalnızca ekran açıkken çalışacak şekilde):
      - O saniye hangi uygulamanın ne kadar indirme/yükleme yaptığını ikonlarıyla çoktan aza sıralı gösterme (`nettop`).
      - Son 1 dakikalık canlı İndirme (yeşil) / Yükleme (turuncu) dalga grafiği.

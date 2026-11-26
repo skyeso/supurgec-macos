@@ -114,8 +114,12 @@ struct SmartScanView: View {
                     icon: "bolt.fill",
                     tint: Color(red: 0.28, green: 0.76, blue: 1.00),
                     state: model.speedState,
-                    headline: model.speedState == .finished ? "2 Hızlı Görev" : (model.speedState == .active ? "Kontrol…" : "Bekliyor"),
-                    caption: "Quick Look ve Launch Services önbelleklerini tazeler",
+                    headline: model.speedState == .finished
+                        ? (model.hasPasswordlessHelper ? "4 Hız Görevi" : "2 Hız Görevi")
+                        : (model.speedState == .active ? "Kontrol…" : "Bekliyor"),
+                    caption: model.hasPasswordlessHelper
+                        ? "RAM boşaltma, DNS sıfırlama, Quick Look ve Launch Services yenileme"
+                        : "Quick Look ve Launch Services önbelleklerini tazeler",
                     toggle: model.phase == .results ? $model.runFlushDNSAndCache : nil,
                     linkTitle: model.speedState == .finished ? "Tüm Bakım Görevleri" : nil,
                     onLink: { onNavigate(.maintenance) }
