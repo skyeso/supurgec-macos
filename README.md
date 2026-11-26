@@ -17,7 +17,16 @@ CleanMyMac tarzı koyu arayüze sahip, arka planda sıfıra yakın kaynak tüket
 
 ## Başka Bir Mac'e İndirip Kurma
 
-### Yöntem 1: Hazır Paket ile Kurulum (Derleme Gerekmez — Önerilen)
+### Yöntem 1: Homebrew ile Tek Satırda Kurulum (En Kolay — Önerilen)
+Homebrew kurulu herhangi bir Mac'te Terminal'e şu komutu yapıştırmanız yeterlidir (`.dmg` indirilir, **Uygulamalar** klasörüne kurulur ve Gatekeeper engeli otomatik kaldırılır):
+
+```bash
+brew install --cask skyeso/tap/supurgec
+```
+
+Güncellemek için `brew upgrade --cask supurgec`, kaldırmak için `brew uninstall --cask supurgec` komutunu kullanabilirsiniz.
+
+### Yöntem 2: Hazır DMG Paketi ile Elle Kurulum (Derleme Gerekmez)
 1. Bu deponun **Releases** sayfasından en güncel `Supurgec-v0.1-alpha-macOS.dmg` (veya `.zip`) dosyasını indirin.
 2. `.dmg` dosyasını açıp **Süpürgeç** simgesini **Applications (Uygulamalar)** klasörüne sürükleyin.
 3. Apple Developer sertifikası olmadan yerel imzalandığı için ilk açılışta macOS Gatekeeper uyarısı çıkarsa Terminal'de bir kez şu komutu çalıştırın:
@@ -27,7 +36,7 @@ xattr -cr "/Applications/Süpürgeç.app"
 open "/Applications/Süpürgeç.app"
 ```
 
-### Yöntem 2: Kaynak Koddan Tek Komutla Kurulum
+### Yöntem 3: Kaynak Koddan Tek Komutla Kurulum
 Xcode Command Line Tools (`xcode-select --install`) kurulu bir Mac'te:
 
 ```bash
