@@ -59,7 +59,7 @@ struct OptimizationView: View {
             .padding(.top, 8)
 
             HStack(spacing: 12) {
-                let safeCount = model.launchAgents.filter { $0.recommendation == .safeToDisable }.count
+                let safeCount = model.launchAgents.filter { $0.recommendation == .safeToDisable || $0.recommendation == .orphaned }.count
                 tabCard(.agents, count: "\(model.launchAgents.count) servis (\(safeCount) gereksiz)", subtitle: "Arka plan güncelleyici ve yardımcıları")
                 tabCard(.login, count: "\(model.loginItems.count) öğe", subtitle: "Oturum açılış uygulamaları")
                 tabCard(.processes, count: "\(model.processes.count) uygulama", subtitle: "Çoktan aza sıralı CPU & RAM")
@@ -160,7 +160,7 @@ struct OptimizationView: View {
     private var launchAgentsList: some View {
         let items = model.launchAgents.filter { item in
             let scopeMatch = (scopeFilter == nil || item.scope == scopeFilter)
-            let recMatch = (!onlySafeToDisable || item.recommendation == .safeToDisable)
+            let recMatch = (!onlySafeToDisable || item.recommendation == .safeToDisable || item.recommendation == .orphaned)
             return scopeMatch && recMatch
         }
 
@@ -248,7 +248,7 @@ struct OptimizationView: View {
 
                                 HStack(spacing: 8) {
                                     RevealInFinderButton(url: item.url)
-                                    Button("Devre Dışı Bırak") {
+                                    Button(item.recommendation == .orphaned ? "Kalıntıyı Sil" : "Devre Dışı Bırak") {
                                         model.disable(item)
                                     }
                                     .buttonStyle(.plain)
@@ -258,9 +258,11 @@ struct OptimizationView: View {
                                     .padding(.vertical, 7)
                                     .background(
                                         Capsule().fill(
-                                            item.recommendation == .safeToDisable
-                                                ? Theme.successGreen.opacity(0.32)
-                                                : Color.white.opacity(0.11)
+                                            item.recommendation == .orphaned
+                                                ? Color.pink.opacity(0.45)
+                                                : (item.recommendation == .safeToDisable
+                                                    ? Theme.successGreen.opacity(0.32)
+                                                    : Color.white.opacity(0.11))
                                         )
                                     )
                                     .fixedSize()
@@ -281,6 +283,7 @@ struct OptimizationView: View {
 
     private func recommendationColor(_ rec: ServiceRecommendation) -> Color {
         switch rec {
+        case .orphaned: return .pink
         case .safeToDisable: return Theme.successGreen
         case .keepIfUsed: return .orange
         case .optional: return .cyan

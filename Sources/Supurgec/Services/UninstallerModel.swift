@@ -65,8 +65,9 @@ final class UninstallerModel: ObservableObject {
         leftovers = []
         findingLeftovers = true
         SystemMonitor.shared.beginTask("\(app.name) tüm sistem kalıntıları aranıyor…")
+        let allAppsSnapshot = apps
         let found = await Task.detached(priority: .userInitiated) {
-            Self.findLeftovers(app: app)
+            Self.findLeftovers(app: app, allInstalledApps: allAppsSnapshot)
         }.value
         SystemMonitor.shared.endTask()
         guard selectedID == app.id else { return }
@@ -103,21 +104,42 @@ final class UninstallerModel: ObservableObject {
             _ = await Task.detached { Shell.run("/usr/bin/defaults", ["delete", bid]) }.value
         }
 
-        // 4. Kullanıcı yetkisiyle silinebilen hedefleri işle
-        let allTargets = [app.url] + selectedLeftovers.map(\.url)
+        // 4. Arka plan servis plist dosyaları Çöp Kutusu'na taşınırsa veya yerinde kalırsa macOS
+        // "Oturum Açma Öğeleri" listesinde görünmeye devam edebilir; bu yüzden plist servislerini doğrudan kaldır.
+        let servicePlists = selectedLeftovers.filter {
+            $0.url.path.contains("/LaunchAgents/") || $0.url.path.contains("/LaunchDaemons/")
+        }
+        let regularLeftovers = selectedLeftovers.filter {
+            !$0.url.path.contains("/LaunchAgents/") && !$0.url.path.contains("/LaunchDaemons/")
+        }
+
+        let allTargets = [app.url] + regularLeftovers.map(\.url)
         var needAdminURLs: [URL] = []
 
+        // Kullanıcı düzeyindeki servis plistlerini durdur ve sil
+        for sp in servicePlists {
+            if !sp.requiresAdmin {
+                _ = await Task.detached { Shell.run("/bin/launchctl", ["unload", "-w", sp.url.path]) }.value
+                do { try FileManager.default.removeItem(at: sp.url) }
+                catch { needAdminURLs.append(sp.url) }
+            } else {
+                needAdminURLs.append(sp.url)
+            }
+        }
+
         if permanently {
-            needAdminURLs = await Task.detached { () -> [URL] in
-                var failed: [URL] = []
+            let failed = await Task.detached { () -> [URL] in
+                var f: [URL] = []
                 for u in allTargets {
                     do { try FileManager.default.removeItem(at: u) }
-                    catch { failed.append(u) }
+                    catch { f.append(u) }
                 }
-                return failed
+                return f
             }.value
+            needAdminURLs.append(contentsOf: failed)
         } else {
-            needAdminURLs = await Task.detached { FileUtils.trash(allTargets) }.value
+            let failed = await Task.detached { FileUtils.trash(allTargets) }.value
+            needAdminURLs.append(contentsOf: failed)
         }
 
         // 5. Sistem (/Library, LaunchDaemons, PrivilegedHelperTools, Receipts) hedefleri veya root sahipli uygulamalar için tek seferde yönetici komutu
@@ -127,18 +149,16 @@ final class UninstallerModel: ObservableObject {
 
         if !needAdminURLs.isEmpty || !receiptPkgIDs.isEmpty {
             var cmds: [String] = []
-            // Sistem LaunchDaemon / LaunchAgent servislerini durdur
             for u in needAdminURLs where u.path.contains("/LaunchDaemons/") || u.path.contains("/LaunchAgents/") {
-                cmds.append("/bin/launchctl unload -w \(Shell.quote(u.path)) 2>/dev/null || true")
+                cmds.append("/bin/launchctl bootout system \(Shell.quote(u.path)) 2>/dev/null || /bin/launchctl unload -w \(Shell.quote(u.path)) 2>/dev/null || true")
             }
-            if permanently {
-                for u in needAdminURLs {
+            let trashDir = FileUtils.home.appendingPathComponent(".Trash").path
+            let stamp = Int(Date().timeIntervalSince1970)
+            for (idx, u) in needAdminURLs.enumerated() {
+                let isServicePlist = u.path.contains("/LaunchDaemons/") || u.path.contains("/LaunchAgents/")
+                if permanently || isServicePlist {
                     cmds.append("/bin/rm -rf \(Shell.quote(u.path))")
-                }
-            } else {
-                let trashDir = FileUtils.home.appendingPathComponent(".Trash").path
-                let stamp = Int(Date().timeIntervalSince1970)
-                for (idx, u) in needAdminURLs.enumerated() {
+                } else {
                     let dest = "\(trashDir)/\(u.lastPathComponent)-\(stamp)-\(idx)"
                     cmds.append("/bin/mv -f \(Shell.quote(u.path)) \(Shell.quote(dest)) && /usr/sbin/chown \(NSUserName()) \(Shell.quote(dest)) || true")
                 }
@@ -278,7 +298,7 @@ final class UninstallerModel: ObservableObject {
         return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    nonisolated static func findLeftovers(app: AppInfo) -> [LeftoverItem] {
+    nonisolated static func findLeftovers(app: AppInfo, allInstalledApps: [AppInfo] = []) -> [LeftoverItem] {
         let userLib = FileUtils.library
         let sysLib = URL(fileURLWithPath: "/Library")
 
@@ -314,31 +334,77 @@ final class UninstallerModel: ObservableObject {
         ]
 
         let bid = app.bundleID.lowercased()
+        let appPathPrefix = app.url.path.lowercased() + "/"
         let bundleName = ((app.url.lastPathComponent as NSString).deletingPathExtension).lowercased()
         let displayName = app.name.lowercased()
         let normDisplay = normalizeToken(displayName)
         let normBundleName = normalizeToken(bundleName)
         let helperIDs = Set(app.privilegedHelpers.map { $0.lowercased() })
 
-        // com.vendor.Product -> vendor ("google", "brave", "cloudflare") ve product ("chrome", "browser")
+        // com.vendor.Product -> vendor ("google", "brave", "cloudflare")
         let bidParts = bid.split(separator: ".").map(String.init)
         let vendorToken: String? = bidParts.count >= 2 ? bidParts[1] : nil
+        let vendorPrefix: String? = bidParts.count >= 2 ? "\(bidParts[0]).\(bidParts[1])." : nil
+
+        // Bu üreticinin (örn. com.cloudflare.*) Mac'te kurulu BAŞKA bir uygulaması var mı?
+        // Başka uygulaması yoksa (örn. Cloudflare, Mullvad, BlueStacks), üretici klasörünü ve com.<vendor>.* servislerini güvenle eşleştir!
+        let hasSiblingVendorApp: Bool = {
+            guard let vp = vendorPrefix, let v = vendorToken, v != "apple" else { return true }
+            return allInstalledApps.contains { other in
+                other.id != app.id && other.bundleID.lowercased().hasPrefix(vp)
+            }
+        }()
+
         let genericWords: Set<String> = [
             "app", "apps", "mail", "notes", "music", "books", "maps", "news", "home",
             "clock", "chess", "stocks", "tv", "photos", "preview", "messages", "contacts"
         ]
 
-        func matchesCandidate(fileName: String) -> Bool {
+        /// LaunchAgent / LaunchDaemon plist dosyasının İÇİNİ okuyarak hedef uygulamanın yoluna işaret edip etmediğini denetler!
+        /// Örn: com.cloudflare.warp.updater.plist -> /Applications/Cloudflare WARP.app/Contents/Resources/warp-updater
+        func plistPointsToApp(_ plistURL: URL) -> Bool {
+            guard plistURL.pathExtension.lowercased() == "plist",
+                  let dict = NSDictionary(contentsOf: plistURL) as? [String: Any] else { return false }
+
+            var candidateStrings: [String] = []
+            if let prog = dict["Program"] as? String { candidateStrings.append(prog) }
+            if let args = dict["ProgramArguments"] as? [String] { candidateStrings.append(contentsOf: args) }
+            if let assoc = dict["AssociatedBundleIdentifiers"] as? [String] { candidateStrings.append(contentsOf: assoc) }
+            if let assocSingle = dict["AssociatedBundleIdentifiers"] as? String { candidateStrings.append(assocSingle) }
+
+            for raw in candidateStrings {
+                let low = raw.lowercased()
+                if low.hasPrefix(appPathPrefix) || low == app.url.path.lowercased() {
+                    return true
+                }
+                if bid.count > 5 && (low == bid || low.contains(bid)) {
+                    return true
+                }
+                if !hasSiblingVendorApp, let v = vendorToken, v.count >= 4, v != "apple" {
+                    if low.contains("/application support/\(v)/") || low.contains("/\(v).app/") {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
+        func matchesCandidate(fileName: String, fullURL: URL, isLaunchPlistDir: Bool) -> Bool {
             let lower = fileName.lowercased()
             let stem = (lower as NSString).deletingPathExtension
             let normStem = normalizeToken(stem)
 
-            // 1. Info.plist içindeki SMPrivilegedExecutables yardımcı servis eşleşmesi
+            // 1. LaunchAgent / LaunchDaemon ise plist dosyasının İÇİNDEKİ ProgramArguments yoluna bak!
+            if isLaunchPlistDir && plistPointsToApp(fullURL) {
+                return true
+            }
+
+            // 2. Info.plist SMPrivilegedExecutables yardımcı servis eşleşmesi
             if helperIDs.contains(lower) || helperIDs.contains(stem) {
                 return true
             }
 
-            // 2. Paket Kimliği (Bundle ID) eşleşmesi (TeamID önekli Group Containers dahil!)
+            // 3. Paket Kimliği (Bundle ID) eşleşmesi
             if bid.count > 5 {
                 if stem == bid || lower == bid
                     || lower.hasPrefix(bid + ".")
@@ -352,7 +418,14 @@ final class UninstallerModel: ObservableObject {
                 }
             }
 
-            // 3. Uygulama Adı eşleşmesi (BlueStacks -> BlueStacks_nxt, Brave Browser -> Brave-Browser dahil)
+            // 4. Tek ürünlü üretici eşleşmesi (örn. Mac'te başka com.cloudflare.* uygulaması yoksa com.cloudflare.warp.updater.plist'i de yakala!)
+            if !hasSiblingVendorApp, let vp = vendorPrefix, let v = vendorToken, v.count >= 5, v != "apple" {
+                if lower.hasPrefix(vp) {
+                    return true
+                }
+            }
+
+            // 5. Uygulama Adı eşleşmesi
             for candidate in Set([normDisplay, normBundleName]) where candidate.count >= 4 && !genericWords.contains(candidate) {
                 if normStem == candidate {
                     return true
@@ -388,36 +461,40 @@ final class UninstallerModel: ObservableObject {
         }
 
         for loc in locations {
+            let isLaunchDir = loc.url.path.hasSuffix("/LaunchAgents") || loc.url.path.hasSuffix("/LaunchDaemons")
             for child in FileUtils.children(of: loc.url) {
                 let name = child.lastPathComponent
                 if name == ".DS_Store" || name == ".localized" { continue }
 
-                if matchesCandidate(fileName: name) {
+                if matchesCandidate(fileName: name, fullURL: child, isLaunchPlistDir: isLaunchDir) {
                     appendItem(child, kind: loc.kind, admin: loc.admin)
                     continue
                 }
 
-                // Üretici alt klasörü kontrolü: ör. ~/Library/Application Support/BraveSoftware/Brave-Browser
-                // veya ~/Library/Application Support/Google/Chrome
+                // Üretici alt klasörü kontrolü:
+                // - Eğer Mac'te bu üreticinin başka uygulaması YOKSA (örn. /Library/Application Support/Cloudflare), doğrudan üretici klasörünü seç!
+                // - Başka uygulaması VARSA (örn. Google/Chrome + Google/DriveFS), yalnızca bu uygulamanın alt klasörünü seç!
                 if loc.allowVendorSubscan, let vendor = vendorToken, vendor.count >= 4, vendor != "apple",
                    FileUtils.isDirectory(child) {
                     let normFolder = normalizeToken(name.lowercased().replacingOccurrences(of: ".localized", with: ""))
                     if normFolder == vendor || normFolder == vendor + "software" || normFolder.hasPrefix(vendor) {
+                        if !hasSiblingVendorApp && (normFolder == vendor || normDisplay.hasPrefix(vendor)) {
+                            appendItem(child, kind: loc.kind, admin: loc.admin)
+                            continue
+                        }
                         let subChildren = FileUtils.children(of: child).filter {
                             $0.lastPathComponent != ".DS_Store" && $0.lastPathComponent != ".localized"
                         }
                         let matchingSubs = subChildren.filter { sub in
                             let subLow = sub.lastPathComponent.lowercased()
                             let subNorm = normalizeToken((subLow as NSString).deletingPathExtension)
-                            if matchesCandidate(fileName: sub.lastPathComponent) { return true }
+                            if matchesCandidate(fileName: sub.lastPathComponent, fullURL: sub, isLaunchPlistDir: false) { return true }
                             if let prod = bidParts.last, prod.count >= 4 && !genericWords.contains(prod) {
                                 if subNorm == normalizeToken(prod) || subNorm == normDisplay { return true }
                             }
                             return false
                         }
                         if !matchingSubs.isEmpty {
-                            // Üretici klasöründe başka bir uygulama yoksa tüm üretici klasörünü seç;
-                            // başka uygulama da varsa (ör. Google/Chrome ve Google/DriveFS) yalnızca bu uygulamanın alt klasörünü seç!
                             if matchingSubs.count == subChildren.count {
                                 appendItem(child, kind: loc.kind, admin: loc.admin)
                             } else {

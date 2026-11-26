@@ -1,12 +1,14 @@
 import AppKit
 
 enum ServiceRecommendation {
+    case orphaned
     case safeToDisable
     case keepIfUsed
     case optional
 
     var badgeTitle: String {
         switch self {
+        case .orphaned: return "Silinmiş Uygulama Kalıntısı!"
         case .safeToDisable: return "Güvenle Kapatılabilir"
         case .keepIfUsed: return "Kullanıyorsanız Kalsın"
         case .optional: return "İsteğe Bağlı"
@@ -400,13 +402,16 @@ final class OptimizationModel: ObservableObject {
     func disable(_ item: LaunchItem) {
         if item.scope == .user {
             Shell.run("/bin/launchctl", ["unload", "-w", item.url.path])
-            let failed = FileUtils.trash([item.url])
-            message = failed.isEmpty ? "\(item.friendlyTitle) devre dışı bırakıldı ve Çöp Kutusu'na taşındı." : "\(item.friendlyTitle) taşınamadı."
+            do {
+                try FileManager.default.removeItem(at: item.url)
+                message = "\(item.friendlyTitle) tamamen kaldırıldı (Oturum Açma Öğeleri'nden düşürüldü)."
+            } catch {
+                message = "\(item.friendlyTitle) kaldırılamadı: \(error.localizedDescription)"
+            }
         } else {
-            let dest = FileUtils.home.appendingPathComponent(".Trash/" + item.url.lastPathComponent).path
-            let cmd = "launchctl unload -w \(Shell.quote(item.url.path)); mv -f \(Shell.quote(item.url.path)) \(Shell.quote(dest)); chown $USER \(Shell.quote(dest)) || true"
+            let cmd = "/bin/launchctl bootout system \(Shell.quote(item.url.path)) 2>/dev/null || /bin/launchctl unload -w \(Shell.quote(item.url.path)) 2>/dev/null || true; /bin/rm -f \(Shell.quote(item.url.path))"
             let r = Shell.runAsAdmin(cmd)
-            message = r.ok ? "\(item.friendlyTitle) devre dışı bırakıldı." : "İşlem iptal edildi."
+            message = r.ok ? "\(item.friendlyTitle) sistemden tamamen silindi (Oturum Açma Öğeleri'nden kaldırıldı)." : "İşlem iptal edildi."
         }
         refreshLaunchAgents()
     }
@@ -463,7 +468,8 @@ final class OptimizationModel: ObservableObject {
                 let dict = NSDictionary(contentsOf: u) as? [String: Any] ?? [:]
                 let label = dict["Label"] as? String ?? u.deletingPathExtension().lastPathComponent
                 let program = dict["Program"] as? String ?? (dict["ProgramArguments"] as? [String])?.first ?? ""
-                let info = describeService(label: label, program: program, scope: scope)
+                let isOrphan = !program.isEmpty && program.hasPrefix("/") && !FileManager.default.fileExists(atPath: program)
+                let info = describeService(label: label, program: program, scope: scope, isOrphan: isOrphan)
                 items.append(LaunchItem(
                     url: u,
                     label: label,
@@ -479,6 +485,8 @@ final class OptimizationModel: ObservableObject {
         }
         return items.sorted { a, b in
             if a.recommendation != b.recommendation {
+                if a.recommendation == .orphaned { return true }
+                if b.recommendation == .orphaned { return false }
                 return a.recommendation == .safeToDisable
             }
             return a.friendlyTitle.localizedCaseInsensitiveCompare(b.friendlyTitle) == .orderedAscending
@@ -488,8 +496,18 @@ final class OptimizationModel: ObservableObject {
     nonisolated private static func describeService(
         label: String,
         program: String,
-        scope: LaunchItem.Scope
+        scope: LaunchItem.Scope,
+        isOrphan: Bool = false
     ) -> (title: String, explanation: String, impact: String, rec: ServiceRecommendation) {
+        if isOrphan {
+            let orphanApp = extractAppName(from: program) ?? prettifyLabel(label)
+            return (
+                "\(orphanApp) — Artık (Yetim) Servis Kaydı",
+                "Bu servisin işaret ettiği uygulama (\(program)) bilgisayarınızdan silinmiş ama servis dosyası geride kalmış.",
+                "Sistem Ayarları › Oturum Açma Öğeleri'nde boşuna görünmemesi için hemen kaldırabilirsiniz.",
+                .orphaned
+            )
+        }
         let l = label.lowercased()
         let p = program.lowercased()
 
