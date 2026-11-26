@@ -21,7 +21,7 @@ CleanMyMac tarzı koyu arayüze sahip, arka planda sıfıra yakın kaynak tüket
 Homebrew kurulu herhangi bir Mac'te Terminal'e şu komutu yapıştırmanız yeterlidir (`.dmg` indirilir, **Uygulamalar** klasörüne kurulur ve Gatekeeper engeli otomatik kaldırılır):
 
 ```bash
-brew install --cask skyeso/tap/supurgec
+brew tap skyeso/tap && brew trust skyeso/tap && brew install --cask skyeso/tap/supurgec
 ```
 
 Güncellemek için `brew upgrade --cask supurgec`, kaldırmak için `brew uninstall --cask supurgec` komutunu kullanabilirsiniz.
