@@ -493,6 +493,14 @@ final class OptimizationModel: ObservableObject {
         let l = label.lowercased()
         let p = program.lowercased()
 
+        if l.contains("com.eso.supurgec") {
+            return (
+                "Süpürgeç Üst Bar Başlatıcısı",
+                "Bilgisayarınız açıldığında Süpürgeç'in ana pencereyi açmadan yalnızca üst menü çubuğunda sessizce başlamasını sağlar.",
+                "Üst bardaki göstergenin her açılışta otomatik gelmesi için açık bırakın (Ayarlar sekmesinden de yönetebilirsiniz).",
+                .keepIfUsed
+            )
+        }
         if l.contains("google.keystone") || l.contains("googleupdater") || p.contains("googleupdater") {
             return (
                 "Google Arka Plan Güncelleyicisi",

@@ -4,6 +4,7 @@ import AppKit
 struct SettingsView: View {
     @ObservedObject var settings = MenuBarSettings.shared
     @ObservedObject var monitor = SystemMonitor.shared
+    @ViewState private var launchAtLogin = LaunchAtLoginService.isEnabled
     @ViewState private var helperInstalled = FileManager.default.fileExists(atPath: Shell.sudoersPath)
     @ViewState private var fullDiskAccess = TrashService.hasFullDiskAccess()
     @ViewState private var statusBanner: String?
@@ -56,6 +57,7 @@ struct SettingsView: View {
     }
 
     private func refreshPermissionStates() {
+        launchAtLogin = LaunchAtLoginService.isEnabled
         helperInstalled = FileManager.default.fileExists(atPath: Shell.sudoersPath)
         fullDiskAccess = TrashService.hasFullDiskAccess()
     }
@@ -353,6 +355,43 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                // 0. Satır: Bilgisayar Açılışında Üst Barda Başlat
+                HStack(spacing: 14) {
+                    Image(systemName: launchAtLogin ? "menubar.dock.rectangle.badge.record" : "menubar.rectangle")
+                        .font(.system(size: 22))
+                        .foregroundStyle(launchAtLogin ? Theme.successGreen : Theme.subtleText)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 8) {
+                            Text("Bilgisayar Açıldığında Yalnızca Üst Barda Başlat")
+                                .font(.system(size: 13.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                            statusPill(active: launchAtLogin)
+                        }
+                        Text("Mac yeniden başladığında veya açıldığında ana pencere ve Dock ikonu açılmaz; yalnızca üst menü çubuğu göstergesi sessizce başlar.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.subtleText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+
+                    Toggle("", isOn: Binding(
+                        get: { launchAtLogin },
+                        set: { newVal in
+                            if LaunchAtLoginService.setEnabled(newVal) {
+                                launchAtLogin = newVal
+                                statusBanner = newVal
+                                    ? "Oturum açılışında üst barda sessiz başlatma etkinleştirildi."
+                                    : "Oturum açılışında otomatik başlatma kapatıldı."
+                            }
+                        }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                }
+
+                Divider().overlay(Color.white.opacity(0.09))
 
                 // 1. Satır: Şifresiz RAM & DNS
                 HStack(spacing: 14) {

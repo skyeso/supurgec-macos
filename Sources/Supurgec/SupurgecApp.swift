@@ -3,76 +3,115 @@ import AppKit
 import Combine
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
+    private var mainWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
-    var openMainWindowHandler: (() -> Void)?
+
+    private var launchedSilentlyInBackground: Bool {
+        CommandLine.arguments.contains("--background")
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        // Çift örnek (iki menü çubuğu ikonu) oluşmasını engelle
+        if let bundleID = Bundle.main.bundleIdentifier {
+            let me = ProcessInfo.processInfo.processIdentifier
+            let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                .filter { $0.processIdentifier != me }
+            if let existing = others.first {
+                if !launchedSilentlyInBackground {
+                    existing.activate(options: [.activateAllWindows])
+                }
+                NSApp.terminate(nil)
+                return
+            }
+        }
+
+        // İlk kurulumda oturum açılışında üst barda başlatmayı varsayılan olarak etkinleştir
+        if UserDefaults.standard.object(forKey: "login.initialized") == nil {
+            UserDefaults.standard.set(true, forKey: "login.initialized")
+            LaunchAtLoginService.setEnabled(true)
+        }
+
         setupStatusBarItem()
-        observeWindowClosing()
-        configureWindows()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            self.configureWindows()
-            NSApp.activate(ignoringOtherApps: true)
+
+        if launchedSilentlyInBackground {
+            // Bilgisayar açılışında: Pencere açma, Dock'ta gösterme — yalnızca üst barda çalış!
+            NSApp.setActivationPolicy(.accessory)
+        } else {
+            // Kullanıcı uygulamaya kendisi tıkladığında: Ana pencereyi ve Dock ikonunu aç
+            showMainWindow()
         }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Ana pencere kapatıldığında uygulama kapanmaz; üst barda çalışmaya devam eder.
         false
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // Uygulamalar veya Spotlight'tan tekrar tıklandığında pencereyi geri aç ve Dock'ta göster.
         if !flag {
             showMainWindow()
         }
         return true
     }
 
-    private func isMainAppWindow(_ window: NSWindow) -> Bool {
-        guard !(window is NSPanel) else { return false }
-        let cls = window.className
-        if cls.contains("StatusBar") || cls.contains("Popover") || cls.contains("MenuBar") {
-            return false
-        }
-        return true
-    }
+    // MARK: - Ana Pencere Yönetimi (Dock Gizleme & Bellek Tasarrufu)
 
-    private func observeWindowClosing() {
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] note in
-            guard let closedWindow = note.object as? NSWindow else { return }
-            Task { @MainActor [weak self] in
-                guard let self, self.isMainAppWindow(closedWindow) else { return }
-                // Pencere kapandıktan hemen sonra görünür başka ana pencere kalmadıysa Dock'tan gizle!
-                try? await Task.sleep(for: .milliseconds(80))
-                let anyMainVisible = NSApp.windows.contains { $0.isVisible && self.isMainAppWindow($0) }
-                if !anyMainVisible {
-                    NSApp.setActivationPolicy(.accessory)
-                }
+    func showMainWindow(navigatingTo module: NavModule? = nil) {
+        NSApp.setActivationPolicy(.regular)
+
+        if mainWindow == nil {
+            let hosting = NSHostingController(rootView: MainWindowView())
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1080, height: 700),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            win.title = "Süpürgeç"
+            win.contentViewController = hosting
+            win.delegate = self
+            win.isReleasedWhenClosed = false
+            win.setFrameAutosaveName("SupurgecMainWindow")
+            win.center()
+            configureWindowAppearance(win)
+            mainWindow = win
+        }
+
+        if let win = mainWindow {
+            configureWindowAppearance(win)
+            win.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+
+        if let module {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                NotificationCenter.default.post(name: .navigateToModule, object: module)
             }
         }
     }
 
-    func configureWindows() {
-        for window in NSApp.windows where isMainAppWindow(window) {
-            window.appearance = NSAppearance(named: .darkAqua)
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.titlebarSeparatorStyle = .none
-            window.toolbar = nil
-            window.styleMask.insert(.fullSizeContentView)
-            window.isMovableByWindowBackground = true
-            window.isOpaque = true
-            window.backgroundColor = NSColor(red: 0.065, green: 0.070, blue: 0.125, alpha: 1.0)
+    func windowWillClose(_ notification: Notification) {
+        guard let closed = notification.object as? NSWindow, closed === mainWindow else { return }
+        // Kırmızı çarpıya (veya Cmd+W) basıldığında pencereyi bellekten düşür ve Dock'tan gizle!
+        mainWindow?.contentViewController = nil
+        mainWindow = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSApp.setActivationPolicy(.accessory)
         }
+    }
+
+    private func configureWindowAppearance(_ window: NSWindow) {
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
+        window.toolbar = nil
+        window.styleMask.insert(.fullSizeContentView)
+        window.isMovableByWindowBackground = true
+        window.isOpaque = true
+        window.backgroundColor = NSColor(red: 0.065, green: 0.070, blue: 0.125, alpha: 1.0)
     }
 
     // MARK: - Kişiselleştirilebilir ve Sabit Genişlikli Menü Çubuğu Öğesi
@@ -161,49 +200,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.contentViewController = nil
         SystemMonitor.shared.endInteractiveSession()
     }
-
-    func showMainWindow(navigatingTo module: NavModule? = nil) {
-        // Ana pencere açılırken uygulamayı tekrar Dock'ta görünür (.regular) yap!
-        NSApp.setActivationPolicy(.regular)
-
-        if let existing = NSApp.windows.first(where: { isMainAppWindow($0) && $0.canBecomeMain }) {
-            configureWindows()
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            if let module {
-                NotificationCenter.default.post(name: .navigateToModule, object: module)
-            }
-        } else {
-            openMainWindowHandler?()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
-                self.configureWindows()
-                if let win = NSApp.windows.first(where: { self.isMainAppWindow($0) }) {
-                    win.makeKeyAndOrderFront(nil)
-                }
-                NSApp.activate(ignoringOtherApps: true)
-                if let module {
-                    NotificationCenter.default.post(name: .navigateToModule, object: module)
-                }
-            }
-        }
-    }
 }
 
 @main
 struct SupurgecApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        Window("Süpürgeç", id: "main") {
-            MainWindowView()
-                .onAppear {
-                    appDelegate.openMainWindowHandler = { openWindow(id: "main") }
-                    appDelegate.configureWindows()
-                }
+        // Settings sahnesi sayesinde SwiftUI açılışta zorla pencere oluşturmaz;
+        // pencere açılışı tamamen AppDelegate (--background kontrolü) tarafından yönetilir!
+        Settings {
+            EmptyView()
         }
-        .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1080, height: 700)
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(replacing: .appSettings) {
