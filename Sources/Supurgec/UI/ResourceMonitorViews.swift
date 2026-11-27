@@ -733,6 +733,8 @@ struct MemoryMonitorDetailView: View {
 
     private func freeRAMAction() {
         let beforeUsed = monitor.memoryUsed
+        let beforeFree = monitor.memFree
+        let beforeApp = monitor.memApp
         freeingRAM = true
         Task {
             let ok = await Shell.freeRAMPasswordlessOrSetup()
@@ -740,10 +742,15 @@ struct MemoryMonitorDetailView: View {
             await inspector.refreshAllProcesses(manual: true)
             freeingRAM = false
             if ok {
-                let diff = max(0, beforeUsed - monitor.memoryUsed)
-                ramFeedback = diff > 32 * 1024 * 1024
-                    ? "RAM önbelleği temizlendi · \(diff.formattedMemory) bellek anında serbest bırakıldı."
-                    : "RAM önbelleği tazelendi · Tüm temizlenebilir sayfalar boşaltıldı."
+                let usedDrop = max(0, beforeUsed - monitor.memoryUsed)
+                let appDrop = max(0, beforeApp - monitor.memApp)
+                let freeGain = max(0, monitor.memFree - beforeFree)
+                let bestReclaimed = max(usedDrop, appDrop, freeGain)
+                if bestReclaimed > 16 * 1024 * 1024 {
+                    ramFeedback = "✓ RAM optimize edildi · \(bestReclaimed.formattedMemory) pasif/önbellek bellek temizlendi ve sıkıştırıldı (Hazır boş alan: \((monitor.memFree + monitor.memCached).formattedMemory))."
+                } else {
+                    ramFeedback = "✓ RAM zaten en verimli durumda · Tüm temizlenebilir önbellek sayfaları boşaltıldı."
+                }
             }
         }
     }
@@ -1680,17 +1687,34 @@ struct NetworkMonitorDetailView: View {
         switch sortBy {
         case .downSpeed:
             return base.sorted {
-                if abs($0.downloadBps - $1.downloadBps) > 32 { return $0.downloadBps > $1.downloadBps }
-                if abs($0.uploadBps - $1.uploadBps) > 32 { return $0.uploadBps > $1.uploadBps }
-                return $0.totalCombinedBytes > $1.totalCombinedBytes
+                let d0 = $0.downloadBps >= 128 ? $0.downloadBps : 0
+                let d1 = $1.downloadBps >= 128 ? $1.downloadBps : 0
+                if abs(d0 - d1) > 256 { return d0 > d1 }
+                let u0 = $0.uploadBps >= 128 ? $0.uploadBps : 0
+                let u1 = $1.uploadBps >= 128 ? $1.uploadBps : 0
+                if abs(u0 - u1) > 256 { return u0 > u1 }
+                if $0.totalCombinedBytes != $1.totalCombinedBytes {
+                    return $0.totalCombinedBytes > $1.totalCombinedBytes
+                }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
             }
         case .upSpeed:
             return base.sorted {
-                if abs($0.uploadBps - $1.uploadBps) > 32 { return $0.uploadBps > $1.uploadBps }
-                return $0.totalOutBytes > $1.totalOutBytes
+                let u0 = $0.uploadBps >= 128 ? $0.uploadBps : 0
+                let u1 = $1.uploadBps >= 128 ? $1.uploadBps : 0
+                if abs(u0 - u1) > 256 { return u0 > u1 }
+                if $0.totalOutBytes != $1.totalOutBytes {
+                    return $0.totalOutBytes > $1.totalOutBytes
+                }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
             }
         case .totalData:
-            return base.sorted { $0.totalCombinedBytes > $1.totalCombinedBytes }
+            return base.sorted {
+                if $0.totalCombinedBytes != $1.totalCombinedBytes {
+                    return $0.totalCombinedBytes > $1.totalCombinedBytes
+                }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
         case .name:
             return base.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
@@ -1990,11 +2014,12 @@ struct NetworkMonitorDetailView: View {
                         .foregroundStyle(Theme.faintText)
                         .padding(.horizontal, 8)
 
-                        LazyVStack(spacing: 6) {
+                        VStack(spacing: 6) {
                             ForEach(filteredApps) { app in
                                 networkAppRow(app)
                             }
                         }
+                        .transaction { $0.animation = nil }
                     }
                 }
             }
@@ -2004,7 +2029,7 @@ struct NetworkMonitorDetailView: View {
             await inspector.refreshConnectionMetadata()
             await inspector.refreshNetworkApps(manual: false)
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2.2))
+                try? await Task.sleep(for: .seconds(3.5))
                 guard !Task.isCancelled else { break }
                 await inspector.refreshNetworkApps(manual: false)
             }

@@ -50,7 +50,13 @@ final class UninstallerModel: ObservableObject {
 
     var filtered: [AppInfo] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-        return q.isEmpty ? apps : apps.filter { $0.name.lowercased().contains(q) || $0.bundleID.lowercased().contains(q) }
+        let base = q.isEmpty ? apps : apps.filter { $0.name.lowercased().contains(q) || $0.bundleID.lowercased().contains(q) }
+        return base.sorted { a, b in
+            let sa = a.size ?? -1
+            let sb = b.size ?? -1
+            if sa != sb { return sa > sb }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
     }
 
     var selectedApp: AppInfo? { apps.first { $0.id == selectedID } }
@@ -94,16 +100,30 @@ final class UninstallerModel: ObservableObject {
 
     func load() async {
         loading = true
-        SystemMonitor.shared.beginTask("Kaldırıcı: Uygulamalar taranıyor…")
-        let found = await Task.detached(priority: .userInitiated) { Self.findApps() }.value
+        SystemMonitor.shared.beginTask("Kaldırıcı: Uygulamalar ve boyutları taranıyor…")
+        let found = await Task.detached(priority: .userInitiated) { () -> [AppInfo] in
+            let rawApps = Self.findApps()
+            return await withTaskGroup(of: (Int, Int64).self) { group in
+                for (idx, app) in rawApps.enumerated() {
+                    let url = app.url
+                    group.addTask(priority: .utility) {
+                        (idx, FileUtils.size(of: url))
+                    }
+                }
+                var sized = rawApps
+                for await (idx, sz) in group {
+                    sized[idx].size = sz
+                }
+                return sized.sorted { a, b in
+                    let sa = a.size ?? 0
+                    let sb = b.size ?? 0
+                    if sa != sb { return sa > sb }
+                    return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+                }
+            }
+        }.value
         apps = found.map { var a = $0; a.icon = NSWorkspace.shared.icon(forFile: a.url.path); return a }
         loading = false
-        SystemMonitor.shared.updateTask("Kaldırıcı: Uygulama boyutları hesaplanıyor…")
-        for app in apps {
-            let url = app.url
-            let s = await Task.detached(priority: .utility) { FileUtils.size(of: url) }.value
-            if let i = apps.firstIndex(where: { $0.id == app.id }) { apps[i].size = s }
-        }
         SystemMonitor.shared.endTask()
     }
 

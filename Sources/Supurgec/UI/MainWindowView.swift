@@ -204,7 +204,7 @@ struct MainWindowView: View {
 
             // En Alt Sürüm ve Katkı İmzası
             VStack(spacing: 2) {
-                Text("Alpha Sürüm 0.2")
+                Text("Alpha Sürüm 0.3")
                     .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(Theme.subtleText)
                 Text("Ensar Gemici katkılarıyla")

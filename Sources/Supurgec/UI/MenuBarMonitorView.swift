@@ -54,11 +54,19 @@ struct MenuBarMonitorView: View {
             refreshTrash()
         }
         .task(id: page) {
-            guard page == .cpu || page == .memory else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3.0))
-                guard !Task.isCancelled else { break }
-                monitor.refreshTopConsumers(manual: false)
+            if page == .cpu || page == .memory {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(3.5))
+                    guard !Task.isCancelled else { break }
+                    monitor.refreshTopConsumers(manual: false)
+                }
+            } else if page == .network {
+                monitor.refreshTopNetworkConsumers(manual: false)
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(3.5))
+                    guard !Task.isCancelled else { break }
+                    monitor.refreshTopNetworkConsumers(manual: false)
+                }
             }
         }
     }
@@ -464,7 +472,7 @@ struct MenuBarMonitorView: View {
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(.white)
                 Spacer()
-                Text("Hız Testi ›")
+                Text("Canlı Trafik ›")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Color.cyan)
             }
@@ -493,7 +501,7 @@ struct MenuBarMonitorView: View {
             Text(
                 monitor.lastSpeedTest != nil
                     ? String(format: "Son test: ↓%.0f / ↑%.0f Mbps", monitor.lastSpeedTest!.downloadMbps, monitor.lastSpeedTest!.uploadMbps)
-                    : "Detay ve hız testi için dokun"
+                    : "Canlı trafik ve hız testi"
             )
             .font(.system(size: 10.5))
             .foregroundStyle(Theme.subtleText)
@@ -508,6 +516,7 @@ struct MenuBarMonitorView: View {
         )
         .contentShape(Rectangle())
         .onTapGesture {
+            monitor.refreshTopNetworkConsumers()
             withAnimation(.easeOut(duration: 0.16)) { page = .network }
         }
     }
@@ -728,8 +737,12 @@ struct MenuBarMonitorView: View {
     // MARK: - 3. Ağ & Speed Test Detay Ekranı
 
     private var networkDetailView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            detailHeader(title: "Ağ ve Hız Testi", icon: "network", tint: .cyan) {
+        let peakScale = max(monitor.peakNetIn, monitor.peakNetOut, 1024)
+        let normDown = monitor.netInHistory.map { min(1.0, $0 / peakScale) }
+        let normUp = monitor.netOutHistory.map { min(1.0, $0 / peakScale) }
+
+        return VStack(alignment: .leading, spacing: 10) {
+            detailHeader(title: "Ağ ve Canlı Trafik", icon: "network", tint: .cyan) {
                 Text("\(monitor.activeInterface) · \(monitor.localIP)")
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(Theme.subtleText)
@@ -737,6 +750,7 @@ struct MenuBarMonitorView: View {
 
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 10) {
+                    // 1. Anlık İndirme / Yükleme Hızı + Canlı Dalga Grafiği
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 10) {
                             metricMiniBox(
@@ -750,6 +764,19 @@ struct MenuBarMonitorView: View {
                                 color: .orange
                             )
                         }
+
+                        ZStack(alignment: .topTrailing) {
+                            SparklineGraph(values: normDown, color: Theme.successGreen)
+                            SparklineGraph(values: normUp, color: .orange)
+                            Text("Tepe: \(formatSpeed(peakScale))")
+                                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Theme.faintText)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.black.opacity(0.35)))
+                        }
+                        .frame(height: 44)
+
                         HStack {
                             Text("Oturum Toplamı: ↓ \(Int64(monitor.totalNetIn).formattedBytes)")
                             Spacer()
@@ -761,6 +788,53 @@ struct MenuBarMonitorView: View {
                     .padding(11)
                     .background(RoundedRectangle(cornerRadius: 12).fill(cardBg).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(stroke, lineWidth: 1)))
 
+                    // 2. Canlı Ağ Kullanan Uygulamalar
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack {
+                            Text("ANLIK AĞ TRAFİĞİ (UYGULAMALAR)")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(Theme.faintText)
+                            Spacer()
+                            if monitor.refreshingNetworkConsumers {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Button { monitor.refreshTopNetworkConsumers(manual: true) } label: {
+                                    Label("Yenile", systemImage: "arrow.clockwise")
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                        .foregroundStyle(Theme.subtleText)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        if monitor.topNetworkConsumers.isEmpty {
+                            Text(monitor.refreshingNetworkConsumers ? "Canlı uygulama trafiği ölçülüyor…" : "Şu an aktif ağ trafiği yapan uygulama yok.")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(Theme.subtleText)
+                                .padding(.vertical, 6)
+                        } else {
+                            ForEach(monitor.topNetworkConsumers) { app in
+                                networkConsumerRow(app)
+                            }
+                        }
+
+                        Button {
+                            onOpenMainWindow(.networkMonitor)
+                        } label: {
+                            Label("Tüm Ağ Trafiğini Uygulamada Gör ›", systemImage: "arrow.up.forward.app.fill")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .foregroundStyle(.cyan)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 7)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.cyan.opacity(0.15)))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 3)
+                    }
+                    .padding(11)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(cardBg).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(stroke, lineWidth: 1)))
+
+                    // 3. Bağlantı Hızı ve Bufferbloat Testi
                     VStack(alignment: .leading, spacing: 10) {
                         Label("Bağlantı Hızı ve Bufferbloat Testi", systemImage: "speedometer")
                             .font(.system(size: 12.5, weight: .bold))
@@ -826,18 +900,6 @@ struct MenuBarMonitorView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(monitor.speedTesting)
-
-                        Button {
-                            onOpenMainWindow(.networkMonitor)
-                        } label: {
-                            Label("Canlı Uygulama Trafiğini Uygulamada Gör ›", systemImage: "arrow.up.forward.app.fill")
-                                .font(.system(size: 11.5, weight: .bold))
-                                .foregroundStyle(.cyan)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 7)
-                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.cyan.opacity(0.15)))
-                        }
-                        .buttonStyle(.plain)
                     }
                     .padding(12)
                     .background(RoundedRectangle(cornerRadius: 12).fill(cardBg).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(stroke, lineWidth: 1)))
@@ -845,6 +907,61 @@ struct MenuBarMonitorView: View {
                 .padding(.trailing, 2)
             }
         }
+    }
+
+    private func networkConsumerRow(_ app: AppNetworkUsage) -> some View {
+        let isActive = app.activeSpeedBps >= 32
+        return HStack(spacing: 8) {
+            if let icon = monitor.cachedIcon(for: app.bundlePath) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .frame(width: 20, height: 20)
+            } else {
+                Image(systemName: app.isSystemService ? "network" : "globe")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.cyan)
+                    .frame(width: 20, height: 20)
+            }
+
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 5) {
+                    Text(app.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    if isActive {
+                        Circle()
+                            .fill(Theme.successGreen)
+                            .frame(width: 5.5, height: 5.5)
+                    }
+                }
+                Text("Toplam: ↓\(Int64(app.totalInBytes).formattedBytes) · ↑\(Int64(app.totalOutBytes).formattedBytes)")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Theme.faintText)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            if isActive {
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("↓ " + formatSpeed(app.downloadBps))
+                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(app.downloadBps >= 1 ? Theme.successGreen : Theme.faintText)
+                        .monospacedDigit()
+                    Text("↑ " + formatSpeed(app.uploadBps))
+                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(app.uploadBps >= 1 ? .orange : Theme.faintText)
+                        .monospacedDigit()
+                }
+            } else {
+                Text(Int64(app.totalCombinedBytes).formattedBytes)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Theme.subtleText)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.vertical, 3)
     }
 
     // MARK: - 4. Disk Detay Ekranı (Tam Dolu Tasarım, Üst/Alt Boş Bar Yok!)

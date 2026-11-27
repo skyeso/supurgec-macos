@@ -105,7 +105,7 @@ struct OptimizationView: View {
         .task(id: tab) {
             guard tab == .processes else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3.0))
+                try? await Task.sleep(for: .seconds(4.0))
                 guard !Task.isCancelled else { break }
                 model.refreshProcesses(manual: false)
             }
@@ -418,7 +418,7 @@ struct OptimizationView: View {
             .padding(.horizontal, 12)
 
             ScrollView {
-                LazyVStack(spacing: 6) {
+                VStack(spacing: 6) {
                     ForEach(model.sortedProcesses) { proc in
                         HStack(spacing: 12) {
                             HStack(spacing: 10) {
@@ -489,6 +489,7 @@ struct OptimizationView: View {
                         .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.035)))
                     }
                 }
+                .transaction { $0.animation = nil }
             }
         }
     }

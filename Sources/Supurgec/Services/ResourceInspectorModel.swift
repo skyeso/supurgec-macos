@@ -427,11 +427,14 @@ actor NetworkProcessSampler {
         let bytesOut: UInt64
     }
 
-    private var prevSnap: (byPID: [Int32: (inB: UInt64, outB: UInt64)], at: Date)?
+    private var prevSnapsByCaller: [String: (byPID: [Int32: (inB: UInt64, outB: UInt64)], at: Date)] = [:]
+    private var smoothedRatesByKey: [String: (down: Double, up: Double)] = [:]
+    private var pidPathCache: [Int32: String] = [:]
 
     func sampleApps(
         runningApps: [OptimizationModel.RunningAppMeta],
-        forceFreshWindow: Bool
+        forceFreshWindow: Bool,
+        caller: String = "inspector"
     ) async -> [AppNetworkUsage] {
         let t1 = Date()
         let rows1 = Self.runNettopOnce()
@@ -442,13 +445,13 @@ actor NetworkProcessSampler {
         let endRows: [RawNetRow]
 
         if !forceFreshWindow,
-           let prev = prevSnap,
-           t1.timeIntervalSince(prev.at) >= 0.5,
-           t1.timeIntervalSince(prev.at) <= 8.0 {
+           let prev = prevSnapsByCaller[caller],
+           t1.timeIntervalSince(prev.at) >= 0.8,
+           t1.timeIntervalSince(prev.at) <= 10.0 {
             baseMap = prev.byPID
             elapsed = t1.timeIntervalSince(prev.at)
             endRows = rows1
-            prevSnap = (Dictionary(uniqueKeysWithValues: rows1.map { ($0.pid, ($0.bytesIn, $0.bytesOut)) }), t1)
+            prevSnapsByCaller[caller] = (Dictionary(uniqueKeysWithValues: rows1.map { ($0.pid, ($0.bytesIn, $0.bytesOut)) }), t1)
         } else {
             let map1 = Dictionary(uniqueKeysWithValues: rows1.map { ($0.pid, ($0.bytesIn, $0.bytesOut)) })
             try? await Task.sleep(for: .milliseconds(550))
@@ -457,11 +460,15 @@ actor NetworkProcessSampler {
             baseMap = map1
             elapsed = max(0.25, t2.timeIntervalSince(t1))
             endRows = rows2.isEmpty ? rows1 : rows2
-            prevSnap = (Dictionary(uniqueKeysWithValues: endRows.map { ($0.pid, ($0.bytesIn, $0.bytesOut)) }), t2)
+            prevSnapsByCaller[caller] = (Dictionary(uniqueKeysWithValues: endRows.map { ($0.pid, ($0.bytesIn, $0.bytesOut)) }), t2)
         }
 
-        // PID -> tam çalıştırılabilir yol haritası (Helper süreçlerini ana .app ile birleştirmek için)
-        let pidPaths = Self.readPIDPaths()
+        // Yalnızca önbellekte olmayan yeni bir PID görülürse ps tablosunu oku (yarı yarıya daha az alt süreç yükü!)
+        let hasUnknownPID = endRows.contains { pidPathCache[$0.pid] == nil }
+        if hasUnknownPID || pidPathCache.isEmpty {
+            pidPathCache = Self.readPIDPaths()
+        }
+        let pidPaths = pidPathCache
         let pidToMeta = Dictionary(uniqueKeysWithValues: runningApps.map { ($0.pid, $0) })
         let bundleApps = runningApps.compactMap { meta -> (prefix: String, bundle: String, name: String)? in
             guard let bp = meta.bundlePath else { return nil }
@@ -557,7 +564,24 @@ actor NetworkProcessSampler {
             }
         }
 
-        return buckets.values.map { b in
+        var nextSmoothed: [String: (down: Double, up: Double)] = [:]
+        let list: [AppNetworkUsage] = buckets.values.map { b in
+            let rawDown = Double(b.dIn) / elapsed
+            let rawUp = Double(b.dOut) / elapsed
+            let smoothDown: Double
+            let smoothUp: Double
+            if let prev = smoothedRatesByKey[b.key] {
+                smoothDown = rawDown == 0 && prev.down < 96 ? 0 : (rawDown * 0.60 + prev.down * 0.40)
+                smoothUp = rawUp == 0 && prev.up < 96 ? 0 : (rawUp * 0.60 + prev.up * 0.40)
+            } else {
+                smoothDown = rawDown
+                smoothUp = rawUp
+            }
+            // 48 B/sn altındaki arka plan keep-alive gürültüsünü 0 kabul et ki satırlar titremesin
+            let cleanDown = smoothDown >= 48 ? smoothDown : 0
+            let cleanUp = smoothUp >= 48 ? smoothUp : 0
+            nextSmoothed[b.key] = (cleanDown, cleanUp)
+
             let sub = b.pids > 1 ? "\(b.pids) ağ bağlantısı süreci" : (b.isSys ? "macOS ağ servisi" : "Uygulama bağlantısı")
             return AppNetworkUsage(
                 id: b.key,
@@ -565,13 +589,15 @@ actor NetworkProcessSampler {
                 subtitle: sub,
                 bundlePath: b.bundlePath,
                 pidCount: b.pids,
-                downloadBps: Double(b.dIn) / elapsed,
-                uploadBps: Double(b.dOut) / elapsed,
+                downloadBps: cleanDown,
+                uploadBps: cleanUp,
                 totalInBytes: b.totIn,
                 totalOutBytes: b.totOut,
                 isSystemService: b.isSys
             )
         }
+        smoothedRatesByKey = nextSmoothed
+        return list
     }
 
     private static func runNettopOnce() -> [RawNetRow] {
@@ -630,6 +656,8 @@ final class ResourceInspectorModel: ObservableObject {
     @Published var refreshingNetwork = false
 
     private var iconCache: [String: NSImage] = [:]
+    private var isSamplingProcesses = false
+    private var isSamplingNetwork = false
 
     func icon(forBundlePath bundlePath: String?, fallbackExecPath: String? = nil) -> NSImage? {
         if let bp = bundlePath, !bp.isEmpty {
@@ -655,14 +683,20 @@ final class ResourceInspectorModel: ObservableObject {
     // MARK: - 1. Bellek & İşlemci Süreç Yenileme
 
     func refreshAllProcesses(manual: Bool = false) async {
-        guard !refreshingProcesses else { return }
-        refreshingProcesses = true
+        guard !isSamplingProcesses else { return }
+        isSamplingProcesses = true
+        if manual || processGroups.isEmpty {
+            refreshingProcesses = true
+        }
         let runningMap = OptimizationModel.buildRunningAppsMap()
         let result = await FullProcessSampler.shared.sampleAll(runningApps: runningMap, forceFreshWindow: manual)
         processGroups = result.groups
         flatProcesses = result.flat
         totalProcessCount = result.flat.count
-        refreshingProcesses = false
+        if refreshingProcesses {
+            refreshingProcesses = false
+        }
+        isSamplingProcesses = false
     }
 
     func terminateGroup(_ group: DetailedProcessGroup) {
@@ -869,12 +903,23 @@ final class ResourceInspectorModel: ObservableObject {
     // MARK: - 3. Canlı Uygulama Bazlı Ağ Trafiği & Bağlantı Bilgileri
 
     func refreshNetworkApps(manual: Bool = false) async {
-        guard !refreshingNetwork else { return }
-        refreshingNetwork = true
+        guard !isSamplingNetwork else { return }
+        isSamplingNetwork = true
+        // Yalnızca kullanıcı elle "Yenile" butonuna bastığında veya liste ilk kez yüklenirken spinner göster!
+        if manual || networkApps.isEmpty {
+            refreshingNetwork = true
+        }
         let runningMap = OptimizationModel.buildRunningAppsMap()
-        let apps = await NetworkProcessSampler.shared.sampleApps(runningApps: runningMap, forceFreshWindow: manual)
+        let apps = await NetworkProcessSampler.shared.sampleApps(
+            runningApps: runningMap,
+            forceFreshWindow: manual,
+            caller: "inspector"
+        )
         networkApps = apps
-        refreshingNetwork = false
+        if refreshingNetwork {
+            refreshingNetwork = false
+        }
+        isSamplingNetwork = false
     }
 
     func refreshConnectionMetadata() async {

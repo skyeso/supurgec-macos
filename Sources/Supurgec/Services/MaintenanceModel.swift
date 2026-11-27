@@ -26,7 +26,7 @@ final class MaintenanceModel: ObservableObject {
         .init(id: "ls", title: "Launch Services'i Yeniden Oluştur",
               detail: "'Birlikte Aç' menüsündeki yinelenen veya silinmiş uygulama kayıtlarını temizler.",
               icon: "square.stack.3d.up.fill", admin: false, oneTimeAuth: false,
-              command: "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -kill -r -domain local -domain system -domain user",
+              command: "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -gc -r -all local,system,user",
               selected: true),
         .init(id: "ql", title: "Quick Look Önbelleğini Sıfırla",
               detail: "Bozuk veya eski küçük resim ve dosya önizlemelerini yeniler.",
@@ -64,8 +64,19 @@ final class MaintenanceModel: ObservableObject {
         // 1. Yönetici yetkisi gerektirmeyen görevler
         for i in sel where !tasks[i].admin {
             SystemMonitor.shared.updateTask("Bakım: \(tasks[i].title)…")
+            let taskID = tasks[i].id
             let cmd = tasks[i].command
-            let r = await Task.detached { Shell.run("/bin/zsh", ["-c", cmd]) }.value
+            let r = await Task.detached { () -> (status: Int32, output: String) in
+                if taskID == "ls" {
+                    let lsreg = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+                    let modern = Shell.run(lsreg, ["-gc", "-r", "-all", "local,system,user"])
+                    if modern.status == 0 { return modern }
+                    let legacy = Shell.run(lsreg, ["-r", "-domain", "local", "-domain", "system", "-domain", "user"])
+                    if legacy.status == 0 { return legacy }
+                    return Shell.run(lsreg, ["-gc"])
+                }
+                return Shell.run("/bin/zsh", ["-c", cmd])
+            }.value
             tasks[i].status = r.status == 0 ? .done : .failed
         }
 

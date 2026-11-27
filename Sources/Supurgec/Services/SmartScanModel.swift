@@ -105,9 +105,10 @@ final class SmartScanModel: ObservableObject {
 
             currentSubtitle = "Quick Look ve Launch Services önbellekleri yenileniyor…"
             SystemMonitor.shared.updateTask("Akıllı Bakım: Hız betikleri çalıştırılıyor…")
+            let lsreg = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
             let cmds = [
                 "qlmanage -r cache; qlmanage -r",
-                "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -kill -r -domain local -domain system -domain user"
+                "\(lsreg) -gc -r -all local,system,user 2>/dev/null || \(lsreg) -r -domain local -domain system -domain user 2>/dev/null || \(lsreg) -gc"
             ]
             for cmd in cmds {
                 let r = await Task.detached { Shell.run("/bin/zsh", ["-c", cmd]) }.value

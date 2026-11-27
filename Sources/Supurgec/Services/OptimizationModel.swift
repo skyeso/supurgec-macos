@@ -33,6 +33,7 @@ struct LaunchItem: Identifiable {
 }
 
 struct ProcessItem: Identifiable {
+    let id: String
     let pid: Int32
     let allPIDs: [Int32]
     let name: String
@@ -44,7 +45,6 @@ struct ProcessItem: Identifiable {
     let isSystemDaemon: Bool
     let isSystemCritical: Bool
     var icon: NSImage?
-    var id: String { name }
 }
 
 enum ProcessSortOrder: String, CaseIterable, Identifiable {
@@ -66,10 +66,14 @@ actor ProcessSampler {
         let fullPath: String
     }
 
-    private var prevSnapshot: (byPID: [Int32: Double], at: Date)?
+    private var prevSnapshotsByCaller: [String: (byPID: [Int32: Double], at: Date)] = [:]
     private var smoothedAppCPU: [String: Double] = [:]
 
-    func sampleGrouped(runningApps: [OptimizationModel.RunningAppMeta], forceFreshWindow: Bool) async -> [ProcessItem] {
+    func sampleGrouped(
+        runningApps: [OptimizationModel.RunningAppMeta],
+        forceFreshWindow: Bool,
+        caller: String = "opt"
+    ) async -> [ProcessItem] {
         let now1 = Date()
         let snap1 = Self.readProcessTable()
 
@@ -78,13 +82,13 @@ actor ProcessSampler {
         let endSnap: [RawProc]
 
         if !forceFreshWindow,
-           let prev = prevSnapshot,
-           now1.timeIntervalSince(prev.at) >= 0.45,
-           now1.timeIntervalSince(prev.at) <= 8.0 {
+           let prev = prevSnapshotsByCaller[caller],
+           now1.timeIntervalSince(prev.at) >= 0.8,
+           now1.timeIntervalSince(prev.at) <= 10.0 {
             baseMap = prev.byPID
             elapsed = now1.timeIntervalSince(prev.at)
             endSnap = snap1
-            prevSnapshot = (Dictionary(uniqueKeysWithValues: snap1.map { ($0.pid, $0.cpuSeconds) }), now1)
+            prevSnapshotsByCaller[caller] = (Dictionary(uniqueKeysWithValues: snap1.map { ($0.pid, $0.cpuSeconds) }), now1)
         } else {
             // İlk ölçüm veya elle "Yenile": gerçek 550ms zaman farkı üzerinden net CPU tüketimi ölç!
             let dict1 = Dictionary(uniqueKeysWithValues: snap1.map { ($0.pid, $0.cpuSeconds) })
@@ -94,7 +98,7 @@ actor ProcessSampler {
             baseMap = dict1
             elapsed = max(0.25, now2.timeIntervalSince(now1))
             endSnap = snap2
-            prevSnapshot = (Dictionary(uniqueKeysWithValues: snap2.map { ($0.pid, $0.cpuSeconds) }), now2)
+            prevSnapshotsByCaller[caller] = (Dictionary(uniqueKeysWithValues: snap2.map { ($0.pid, $0.cpuSeconds) }), now2)
         }
 
         let coreCount = Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
@@ -219,19 +223,21 @@ actor ProcessSampler {
         var nextSmoothed: [String: Double] = [:]
         var result: [ProcessItem] = []
 
-        for (_, b) in buckets {
+        for (groupKey, b) in buckets {
             // Tüm çekirdeklerin toplam kapasitesine (%0 - %100) oranla gerçek CPU yüzdesi!
             let rawMacPercent = min(100.0, (b.deltaCPUSec / (elapsed * coreCount)) * 100.0)
             let finalCPU: Double
-            if let prev = smoothedAppCPU[b.name] {
-                finalCPU = rawMacPercent * 0.70 + prev * 0.30
+            if let prev = smoothedAppCPU[groupKey] {
+                finalCPU = rawMacPercent * 0.45 + prev * 0.55
             } else {
                 finalCPU = rawMacPercent
             }
-            nextSmoothed[b.name] = finalCPU
+            nextSmoothed[groupKey] = finalCPU
 
             let memMB = b.rssKB / 1024.0
-            if finalCPU < 0.05 && memMB < 20 { continue }
+            // Kararlı bellek eşiği: boşta bekleyen uygulamaların %0.05 CPU sınırında listeye girip çıkarak
+            // satır sayısını ve sıralamayı titretmesini önler.
+            if memMB < 15 && finalCPU < 0.25 { continue }
 
             let subtitle: String
             if let sysMatch = friendlySystemNames.first(where: { b.name == $0.value.title }) {
@@ -245,6 +251,7 @@ actor ProcessSampler {
             }
 
             result.append(ProcessItem(
+                id: groupKey,
                 pid: b.rootPID,
                 allPIDs: b.pids,
                 name: b.name,
@@ -311,6 +318,9 @@ final class OptimizationModel: ObservableObject {
     @Published var refreshingProcesses = false
     @Published var message: String?
 
+    private var isSamplingProcesses = false
+    private var iconCache: [String: NSImage] = [:]
+
     struct RunningAppMeta: Sendable {
         let pid: Int32
         let name: String
@@ -326,13 +336,18 @@ final class OptimizationModel: ObservableObject {
         switch sortOrder {
         case .cpu:
             return Array(base.sorted {
-                if abs($0.cpu - $1.cpu) > 0.05 { return $0.cpu > $1.cpu }
-                return $0.memoryMB > $1.memoryMB
+                // Küçük (%0.30 altı) boşta CPU dalgalanmalarında satırların sürekli yer değiştirmesini önle
+                let c0 = $0.cpu >= 0.25 ? $0.cpu : 0
+                let c1 = $1.cpu >= 0.25 ? $1.cpu : 0
+                if abs(c0 - c1) > 0.30 { return c0 > c1 }
+                if abs($0.memoryMB - $1.memoryMB) > 2.0 { return $0.memoryMB > $1.memoryMB }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
             }.prefix(25))
         case .memory:
             return Array(base.sorted {
-                if abs($0.memoryMB - $1.memoryMB) > 0.5 { return $0.memoryMB > $1.memoryMB }
-                return $0.cpu > $1.cpu
+                if abs($0.memoryMB - $1.memoryMB) > 2.0 { return $0.memoryMB > $1.memoryMB }
+                if abs($0.cpu - $1.cpu) > 0.30 { return $0.cpu > $1.cpu }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
             }.prefix(25))
         }
     }
@@ -357,20 +372,39 @@ final class OptimizationModel: ObservableObject {
     }
 
     func refreshProcesses(manual: Bool = false) {
-        guard !refreshingProcesses else { return }
-        refreshingProcesses = true
+        guard !isSamplingProcesses else { return }
+        isSamplingProcesses = true
+        // Yalnızca kullanıcı elle "Yenile" dediğinde veya liste ilk kez dolarken spinner göster!
+        if manual || processes.isEmpty {
+            refreshingProcesses = true
+        }
         if manual {
             SystemMonitor.shared.beginTask("Optimizasyon: Uygulama CPU yükleri ölçülüyor…")
         }
         let runningMap = Self.buildRunningAppsMap()
         Task {
-            let items = await ProcessSampler.shared.sampleGrouped(runningApps: runningMap, forceFreshWindow: manual)
+            let items = await ProcessSampler.shared.sampleGrouped(
+                runningApps: runningMap,
+                forceFreshWindow: manual,
+                caller: "optimization"
+            )
             self.processes = items.map { item in
                 var copy = item
-                copy.icon = item.bundlePath.map { NSWorkspace.shared.icon(forFile: $0) }
+                if let bp = item.bundlePath {
+                    if let cached = self.iconCache[bp] {
+                        copy.icon = cached
+                    } else {
+                        let img = NSWorkspace.shared.icon(forFile: bp)
+                        self.iconCache[bp] = img
+                        copy.icon = img
+                    }
+                }
                 return copy
             }
-            self.refreshingProcesses = false
+            if self.refreshingProcesses {
+                self.refreshingProcesses = false
+            }
+            self.isSamplingProcesses = false
             if manual {
                 SystemMonitor.shared.endTask("✓ İşlemci analizi güncellendi")
             }

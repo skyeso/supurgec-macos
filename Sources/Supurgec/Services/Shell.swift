@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum Shell {
     static let sudoersPath = "/private/etc/sudoers.d/supurgec"
@@ -37,14 +38,71 @@ enum Shell {
     }
 
     /// Tek seferlik parola kurulumuyla RAM boşaltır:
-    /// İlk çalıştırmada yönetici onayı alıp yalnızca purge & DNS temizleme komutlarını
-    /// yetkilendirir; sonraki tüm çalıştırmalarda şifre sormadan anında çalışır.
+    /// 1) Önce kullanıcı alanı bellek baskısı darbesiyle (inactive sayfaları sıkıştırıcıya iterek) ve malloc/URLCache
+    ///    temizliğiyle pasif uygulama sayfalarını sıkıştırır.
+    /// 2) Ardından çekirdek disk/dosya/purgeable önbelleklerini (/usr/sbin/purge) tamamen boşaltır.
     static func freeRAMPasswordlessOrSetup() async -> Bool {
-        let fast = await Task.detached(priority: .userInitiated) {
-            Self.run("/usr/bin/sudo", ["-n", "/usr/sbin/purge"])
+        URLCache.shared.removeAllCachedResponses()
+        let fast = await Task.detached(priority: .userInitiated) { () -> Bool in
+            Self.reclaimInactivePagesPulse()
+            let r = Self.run("/usr/bin/sudo", ["-n", "/usr/sbin/purge"])
+            if r.status == 0 {
+                usleep(250_000)
+                return true
+            }
+            return false
         }.value
-        if fast.status == 0 { return true }
-        return await installHelperAndRun(afterInstallCommand: "/usr/sbin/purge")
+        if fast { return true }
+        let ok = await installHelperAndRun(afterInstallCommand: "/usr/sbin/purge")
+        if ok {
+            await Task.detached(priority: .userInitiated) {
+                Self.reclaimInactivePagesPulse()
+                _ = Self.run("/usr/bin/sudo", ["-n", "/usr/sbin/purge"])
+                usleep(250_000)
+            }.value
+        }
+        return ok
+    }
+
+    /// Pasif (inactive) anonim bellek sayfalarını macOS VM sıkıştırıcısına (compressor) aktarmak ve
+    /// boşta bekleyen önbellek sayfalarını tahliye etmek için kısa süreli (~180ms) güvenli bellek darbesi uygular.
+    nonisolated private static func reclaimInactivePagesPulse() {
+        malloc_zone_pressure_relief(nil, 0)
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let kr = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return }
+        let pageSize = Int(sysconf(_SC_PAGESIZE))
+        let inactiveBytes = Int64(stats.inactive_count) * Int64(pageSize)
+        let freeBytes = Int64(stats.free_count) * Int64(pageSize)
+        // Yalnızca kayda değer pasif bellek varsa, güvenli bir dilimi (en fazla 1.5 GB) hızla dokunup serbest bırak
+        let targetBytes = min(max(inactiveBytes / 2, freeBytes / 2), 1536 * 1024 * 1024)
+        guard targetBytes >= 128 * 1024 * 1024 else { return }
+
+        let chunkSize = 64 * 1024 * 1024
+        let chunkCount = max(1, Int(targetBytes) / chunkSize)
+        var chunks: [UnsafeMutableRawPointer] = []
+        chunks.reserveCapacity(chunkCount)
+
+        for _ in 0..<chunkCount {
+            guard let ptr = mmap(nil, chunkSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0),
+                  ptr != MAP_FAILED else { break }
+            let bytePtr = ptr.assumingMemoryBound(to: UInt8.self)
+            var offset = 0
+            while offset < chunkSize {
+                bytePtr[offset] = 1
+                offset += pageSize
+            }
+            chunks.append(ptr)
+        }
+        for ptr in chunks {
+            munmap(ptr, chunkSize)
+        }
+        malloc_zone_pressure_relief(nil, 0)
     }
 
     /// Tek seferlik parola kurulumuyla DNS önbelleğini temizler.

@@ -95,6 +95,11 @@ final class SystemMonitor: ObservableObject {
     @Published var topMemConsumers: [TopConsumer] = []
     @Published var refreshingConsumers: Bool = false
 
+    // Üst menü çubuğu Ağ sekmesi için canlı uygulama trafiği
+    @Published var topNetworkConsumers: [AppNetworkUsage] = []
+    @Published var refreshingNetworkConsumers: Bool = false
+    private var netIconCache: [String: NSImage] = [:]
+
     // Hız testi
     @Published var speedTesting = false
     @Published var speedTestStatus = ""
@@ -112,6 +117,8 @@ final class SystemMonitor: ObservableObject {
     private var prevSelfUsage: (cpuSec: Double, diskIO: UInt64, at: Date)?
     private var timer: Timer?
     private var activeConsumers = 0
+    private var isSamplingConsumers = false
+    private var isSamplingNetworkConsumers = false
 
     private init() {
         updateFull()
@@ -264,12 +271,19 @@ final class SystemMonitor: ObservableObject {
     // MARK: - Gerçek Delta CPU Süreç Listesi (Zıplama Yapmaz, Toplam Yük İle Birebir Örtüşür!)
 
     func refreshTopConsumers(manual: Bool = false) {
-        guard !refreshingConsumers else { return }
-        refreshingConsumers = true
+        guard !isSamplingConsumers else { return }
+        isSamplingConsumers = true
+        if manual || topCPUConsumers.isEmpty {
+            refreshingConsumers = true
+        }
         let runningMap = OptimizationModel.buildRunningAppsMap()
 
         Task {
-            let grouped = await ProcessSampler.shared.sampleGrouped(runningApps: runningMap, forceFreshWindow: manual)
+            let grouped = await ProcessSampler.shared.sampleGrouped(
+                runningApps: runningMap,
+                forceFreshWindow: manual,
+                caller: "menubar"
+            )
 
             // Kullanıcı uygulamalarını ve yalnızca kayda değer yük tüketen sistem servislerini göster
             let visible = grouped.filter { !$0.isSystemDaemon || $0.cpu >= 1.5 || $0.memoryMB >= 300 }
@@ -281,13 +295,13 @@ final class SystemMonitor: ObservableObject {
                     subtitle: g.helperCount > 1 ? "\(g.helperCount) süreç toplamı" : "",
                     cpu: g.cpu,
                     memoryBytes: Int64(g.memoryMB * 1024 * 1024),
-                    icon: g.bundlePath.map { NSWorkspace.shared.icon(forFile: $0) }
+                    icon: self.cachedIcon(for: g.bundlePath)
                 )
             }
 
             self.topCPUConsumers = Array(
                 mapped.sorted {
-                    if abs($0.cpu - $1.cpu) > 0.05 { return $0.cpu > $1.cpu }
+                    if abs($0.cpu - $1.cpu) > 0.25 { return $0.cpu > $1.cpu }
                     return $0.memoryBytes > $1.memoryBytes
                 }.prefix(6)
             )
@@ -299,7 +313,47 @@ final class SystemMonitor: ObservableObject {
                 }.prefix(6)
             )
             self.refreshingConsumers = false
+            self.isSamplingConsumers = false
         }
+    }
+
+    // MARK: - Üst Menü Çubuğu Ağ Sekmesi İçin Canlı Uygulama Trafiği (Yalnızca Ağ Sekmesi Açıkken Çalışır)
+
+    func refreshTopNetworkConsumers(manual: Bool = false) {
+        guard !isSamplingNetworkConsumers else { return }
+        isSamplingNetworkConsumers = true
+        if manual || topNetworkConsumers.isEmpty {
+            refreshingNetworkConsumers = true
+        }
+        let runningMap = OptimizationModel.buildRunningAppsMap()
+
+        Task {
+            let apps = await NetworkProcessSampler.shared.sampleApps(
+                runningApps: runningMap,
+                forceFreshWindow: manual,
+                caller: "menubar"
+            )
+            let sorted = apps.sorted {
+                let s0 = $0.activeSpeedBps >= 128 ? $0.activeSpeedBps : 0
+                let s1 = $1.activeSpeedBps >= 128 ? $1.activeSpeedBps : 0
+                if abs(s0 - s1) > 256 {
+                    return s0 > s1
+                }
+                return $0.totalCombinedBytes > $1.totalCombinedBytes
+            }
+            self.topNetworkConsumers = Array(sorted.prefix(6))
+            self.refreshingNetworkConsumers = false
+            self.isSamplingNetworkConsumers = false
+        }
+    }
+
+    func cachedIcon(for bundlePath: String?) -> NSImage? {
+        guard let bp = bundlePath, !bp.isEmpty else { return nil }
+        if let img = netIconCache[bp] { return img }
+        guard FileManager.default.fileExists(atPath: bp) else { return nil }
+        let img = NSWorkspace.shared.icon(forFile: bp)
+        netIconCache[bp] = img
+        return img
     }
 
     // MARK: - Dahili Hız ve Bufferbloat Testi
@@ -489,7 +543,7 @@ final class SystemMonitor: ObservableObject {
         let purgeable = Double(stats.purgeable_count) * page
         let external = Double(stats.external_page_count) * page
         let free = Double(stats.free_count) * page
-        let app = max(0, (Double(stats.internal_page_count) - Double(stats.purgeable_count)) * page)
+        let app = max(0, Double(stats.internal_page_count) * page)
         let wired = Double(stats.wire_count) * page
         let compressed = Double(stats.compressor_page_count) * page
 
