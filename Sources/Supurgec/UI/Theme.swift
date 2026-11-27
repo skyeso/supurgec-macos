@@ -10,6 +10,10 @@ extension Notification.Name {
 
 enum NavModule: String, CaseIterable, Identifiable {
     case smartScan
+    case memoryMonitor
+    case cpuMonitor
+    case diskMonitor
+    case networkMonitor
     case systemJunk
     case uninstaller
     case optimization
@@ -18,9 +22,19 @@ enum NavModule: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    var isLiveMonitor: Bool {
+        switch self {
+        case .memoryMonitor, .cpuMonitor, .diskMonitor, .networkMonitor:
+            return true
+        default:
+            return false
+        }
+    }
+
     var section: String {
         switch self {
         case .smartScan: return "Genel"
+        case .memoryMonitor, .cpuMonitor, .diskMonitor, .networkMonitor: return "Canlı İzleyici"
         case .systemJunk: return "Temizlik"
         case .optimization, .maintenance: return "Hız"
         case .uninstaller: return "Uygulamalar"
@@ -31,6 +45,10 @@ enum NavModule: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .smartScan: return "Akıllı Tarama"
+        case .memoryMonitor: return "Bellek"
+        case .cpuMonitor: return "İşlemci"
+        case .diskMonitor: return "Disk"
+        case .networkMonitor: return "Ağ"
         case .systemJunk: return "Sistem Çöpü"
         case .uninstaller: return "Kaldırıcı"
         case .optimization: return "Optimizasyon"
@@ -43,6 +61,14 @@ enum NavModule: String, CaseIterable, Identifiable {
         switch self {
         case .smartScan:
             return "Mac'inizi tek dokunuşla analiz edin: gereksiz dosyaları temizleyin, başlangıç öğelerini denetleyin ve performansı artırın."
+        case .memoryMonitor:
+            return "Belleğinizi kullanan tüm uygulamaları, alt süreçlerini, bağlı/sıkıştırılmış RAM dağılımını ve takas (swap) sağlığını tüm detaylarıyla inceleyin."
+        case .cpuMonitor:
+            return "Çekirdek bazlı anlık işlemci yükünü, sistem/kullanıcı dağılımını ve işlemciyi kullanan tüm uygulamaları canlı olarak takip edin."
+        case .diskMonitor:
+            return "APFS depolama dağılımını, temizlenebilir sistem önbelleğini, klasör bazlı alan kullanımını ve unutulmuş büyük dosyaları keşfedin."
+        case .networkMonitor:
+            return "Hangi uygulamanın anlık ne kadar veri indirip yüklediğini, ağ geçidi/DNS detaylarını ve bağlantı kalitenizi canlı izleyin."
         case .systemJunk:
             return "Önbellekleri, günlükleri, Xcode ve geliştirici kalıntılarını temizleyerek diskinizde güvenli şekilde yer açın."
         case .uninstaller:
@@ -59,6 +85,10 @@ enum NavModule: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .smartScan: return "paintbrush.pointed.fill"
+        case .memoryMonitor: return "memorychip"
+        case .cpuMonitor: return "cpu.fill"
+        case .diskMonitor: return "internaldrive.fill"
+        case .networkMonitor: return "network"
         case .systemJunk: return "trash.circle.fill"
         case .uninstaller: return "xmark.app.fill"
         case .optimization: return "gauge.with.dots.needle.67percent"
@@ -70,6 +100,10 @@ enum NavModule: String, CaseIterable, Identifiable {
     var heroSymbol: String {
         switch self {
         case .smartScan: return "paintbrush.pointed.fill"
+        case .memoryMonitor: return "memorychip.fill"
+        case .cpuMonitor: return "cpu.fill"
+        case .diskMonitor: return "internaldrive.fill"
+        case .networkMonitor: return "waveform.path.ecg"
         case .systemJunk: return "externaldrive.fill.badge.minus"
         case .uninstaller: return "square.stack.3d.up.slash.fill"
         case .optimization: return "bolt.shield.fill"
@@ -82,6 +116,14 @@ enum NavModule: String, CaseIterable, Identifiable {
         switch self {
         case .smartScan:
             return [Color(red: 0.25, green: 0.78, blue: 1.00), Color(red: 0.58, green: 0.35, blue: 0.98), Color(red: 0.98, green: 0.34, blue: 0.66)]
+        case .memoryMonitor:
+            return [Color(red: 0.20, green: 0.88, blue: 0.64), Color(red: 0.16, green: 0.72, blue: 0.96), Color(red: 0.48, green: 0.38, blue: 0.96)]
+        case .cpuMonitor:
+            return [Color(red: 0.68, green: 0.40, blue: 1.00), Color(red: 0.96, green: 0.36, blue: 0.68), Color(red: 0.28, green: 0.68, blue: 1.00)]
+        case .diskMonitor:
+            return [Color(red: 0.22, green: 0.78, blue: 1.00), Color(red: 0.38, green: 0.48, blue: 0.98), Color(red: 0.92, green: 0.36, blue: 0.68)]
+        case .networkMonitor:
+            return [Color(red: 0.18, green: 0.84, blue: 0.88), Color(red: 0.20, green: 0.60, blue: 0.98), Color(red: 0.98, green: 0.60, blue: 0.24)]
         case .systemJunk:
             return [Color(red: 0.99, green: 0.34, blue: 0.62), Color(red: 0.88, green: 0.26, blue: 0.78), Color(red: 0.42, green: 0.36, blue: 0.96)]
         case .uninstaller:
@@ -101,6 +143,14 @@ enum NavModule: String, CaseIterable, Identifiable {
         switch self {
         case .smartScan:
             return [Color(red: 0.10, green: 0.10, blue: 0.20), Color(red: 0.07, green: 0.08, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.10)]
+        case .memoryMonitor:
+            return [Color(red: 0.07, green: 0.14, blue: 0.18), Color(red: 0.07, green: 0.09, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.10)]
+        case .cpuMonitor:
+            return [Color(red: 0.13, green: 0.09, blue: 0.22), Color(red: 0.08, green: 0.08, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.10)]
+        case .diskMonitor:
+            return [Color(red: 0.08, green: 0.12, blue: 0.22), Color(red: 0.07, green: 0.08, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.10)]
+        case .networkMonitor:
+            return [Color(red: 0.07, green: 0.13, blue: 0.21), Color(red: 0.07, green: 0.09, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.10)]
         case .systemJunk:
             return [Color(red: 0.15, green: 0.09, blue: 0.19), Color(red: 0.08, green: 0.08, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.10)]
         case .uninstaller:

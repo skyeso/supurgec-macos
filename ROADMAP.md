@@ -14,11 +14,9 @@ Bu dosya, geliştirme sırasında *"aklımızda bulunsun / ileride değerlendire
    - **Akıllı Tarama** içindeki *"Çalıştır"* adımına şifresiz **RAM Boşaltma + DNS Temizleme** eklendi.
    - *(Bonus — Tamamlandı ✅)* **Çoklu Seçmeli Kökten Kaldırıcı:** 28 noktalı derin tarama, aynı anda birden fazla uygulamayı seçip toplu silme ve `Oturum Açma Öğeleri` kalıntılarını (`lsregister -u` + `backgroundtaskmanagementd` yenilemesi + Çöp Kutusu'nda bekletmeden kalıcı imha) sıfırlama eklendi.
 
-3. **Ağ Kartı İçinde Canlı Veri Alışverişi (Uygulama Bazlı Trafik + Grafik)** *(Bekliyor)*
-   - Üst bardaki **Ağ** kartına tıklandığında (boştayken `%0` ek yükle, yalnızca ekran açıkken çalışacak şekilde):
-     - O saniye hangi uygulamanın ne kadar indirme/yükleme yaptığını ikonlarıyla çoktan aza sıralı gösterme (`nettop`).
-     - Son 1 dakikalık canlı İndirme (yeşil) / Yükleme (turuncu) dalga grafiği.
-     - Modem (Gateway) IP, aktif DNS ve anlık modem ping (`ms`) bilgisi.
+3. **Ağ Kartı İçinde Canlı Veri Alışverişi (Uygulama Bazlı Trafik + Grafik)** *(Ana Uygulamada Tamamlandı ✅ / Üst Bar Popover İsteğe Bağlı)*
+   - Ana uygulama içine kapsamlı **Bellek, İşlemci, Disk ve Ağ Merkezleri** eklendi (`nettop` uygulama bazlı canlı trafik, çift renkli dalga grafiği, modem IP / DNS / ping, çekirdek bazlı CPU yükleri, sınırsız süreç & alt süreç kırılımı ve APFS disk/büyük dosya analizi).
+   - İleride istenirse üst menü çubuğundaki küçük **Ağ** kartının içine de mini uygulama listesi eklenebilir.
 
 4. **3 Katmanlı Hafif Güvenlik ve Sızma Denetçisi (Virüs / Zararlı Taraması)**
    - Arka planda RAM şişirmeden çalışacak güvenlik modülü:

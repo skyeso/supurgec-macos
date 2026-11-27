@@ -585,6 +585,19 @@ struct MenuBarMonitorView: View {
                         ForEach(monitor.topMemConsumers) { p in
                             consumerRow(p, rightText: p.memoryBytes.formattedMemory, highlight: false)
                         }
+
+                        Button {
+                            onOpenMainWindow(.memoryMonitor)
+                        } label: {
+                            Label("Tüm Bellek Detaylarını Uygulamada Aç ›", systemImage: "arrow.up.forward.app.fill")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .foregroundStyle(Theme.successGreen)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 7)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.successGreen.opacity(0.14)))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 4)
                     }
                     .padding(11)
                     .background(RoundedRectangle(cornerRadius: 12).fill(cardBg).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(stroke, lineWidth: 1)))
@@ -658,6 +671,19 @@ struct MenuBarMonitorView: View {
                                 consumerRow(p, rightText: String(format: "%%%.1f", p.cpu), highlight: p.cpu > 35)
                             }
                         }
+
+                        Button {
+                            onOpenMainWindow(.cpuMonitor)
+                        } label: {
+                            Label("Tüm İşlemci Detaylarını Uygulamada Aç ›", systemImage: "arrow.up.forward.app.fill")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .foregroundStyle(.purple)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 7)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.purple.opacity(0.16)))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 4)
                     }
                     .padding(11)
                     .background(RoundedRectangle(cornerRadius: 12).fill(cardBg).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(stroke, lineWidth: 1)))
@@ -800,6 +826,18 @@ struct MenuBarMonitorView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(monitor.speedTesting)
+
+                        Button {
+                            onOpenMainWindow(.networkMonitor)
+                        } label: {
+                            Label("Canlı Uygulama Trafiğini Uygulamada Gör ›", systemImage: "arrow.up.forward.app.fill")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .foregroundStyle(.cyan)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 7)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.cyan.opacity(0.15)))
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(12)
                     .background(RoundedRectangle(cornerRadius: 12).fill(cardBg).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(stroke, lineWidth: 1)))
@@ -859,6 +897,21 @@ struct MenuBarMonitorView: View {
             .background(RoundedRectangle(cornerRadius: 12).fill(cardBg).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(stroke, lineWidth: 1)))
 
             VStack(spacing: 8) {
+                Button {
+                    onOpenMainWindow(.diskMonitor)
+                } label: {
+                    Label("Kapsamlı Disk Analizini Uygulamada Aç ›", systemImage: "chart.pie.fill")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(LinearGradient(colors: NavModule.diskMonitor.accentColors, startPoint: .leading, endPoint: .trailing))
+                        )
+                }
+                .buttonStyle(.plain)
+
                 Button {
                     onOpenMainWindow(.systemJunk)
                 } label: {

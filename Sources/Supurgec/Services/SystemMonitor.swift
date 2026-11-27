@@ -40,7 +40,12 @@ final class SystemMonitor: ObservableObject {
     @Published var cpuSystem: Double = 0
     @Published var cpuIdle: Double = 1
     @Published var loadAverage: (Double, Double, Double) = (0, 0, 0)
+    @Published var coreLoads: [Double] = []
     let coreCount: Int = ProcessInfo.processInfo.activeProcessorCount
+    let cpuBrand: String = SystemMonitor.readSysctlString("machdep.cpu.brand_string") ?? "Apple Silicon"
+    let perfCoreCount: Int = SystemMonitor.readSysctlInt("hw.perflevel0.logicalcpu")
+    let effCoreCount: Int = SystemMonitor.readSysctlInt("hw.perflevel1.logicalcpu")
+    let pageSizeBytes: Int = Int(sysconf(_SC_PAGESIZE))
 
     @Published var memoryUsed: Double = 0
     @Published var memoryTotal: Double = Double(ProcessInfo.processInfo.physicalMemory)
@@ -48,10 +53,18 @@ final class SystemMonitor: ObservableObject {
     @Published var memWired: Double = 0
     @Published var memCompressed: Double = 0
     @Published var memCached: Double = 0
+    @Published var memFree: Double = 0
     @Published var swapUsed: Double = 0
+    @Published var swapTotal: Double = 0
+    @Published var pageIns: UInt64 = 0
+    @Published var pageOuts: UInt64 = 0
 
     @Published var diskUsed: Double = 0
     @Published var diskTotal: Double = 1
+    @Published var diskFreeImmediate: Double = 0
+    @Published var diskPurgeable: Double = 0
+    @Published var volumeName: String = "Macintosh HD"
+    @Published var fileSystemFormat: String = "APFS"
 
     @Published var netIn: Double = 0
     @Published var netOut: Double = 0
@@ -59,8 +72,13 @@ final class SystemMonitor: ObservableObject {
     @Published var totalNetOut: UInt64 = 0
     @Published var localIP: String = "—"
     @Published var activeInterface: String = "en0"
+    @Published var vpnTunnelActive: Bool = false
+    @Published var netInHistory: [Double] = Array(repeating: 0, count: 60)
+    @Published var netOutHistory: [Double] = Array(repeating: 0, count: 60)
+    @Published var peakNetIn: Double = 1024
+    @Published var peakNetOut: Double = 1024
 
-    @Published var cpuHistory: [Double] = Array(repeating: 0, count: 30)
+    @Published var cpuHistory: [Double] = Array(repeating: 0, count: 60)
 
     // Süpürgeç anlık işlem ve öz tüketim verileri
     @Published var currentActivity: String = "Hazır · Sistem İzleniyor"
@@ -89,6 +107,7 @@ final class SystemMonitor: ObservableObject {
     private var activeTaskStack: [String] = []
     private var clearBannerTask: Task<Void, Never>?
     private var prevTicks: (user: Double, system: Double, idle: Double, nice: Double)?
+    private var prevCoreTicks: [(user: Double, system: Double, idle: Double)] = []
     private var prevNet: (inB: UInt64, outB: UInt64, at: Date)?
     private var prevSelfUsage: (cpuSec: Double, diskIO: UInt64, at: Date)?
     private var timer: Timer?
@@ -220,7 +239,8 @@ final class SystemMonitor: ObservableObject {
         cpuPercentInt = Int((sample.totalUsed * 100).rounded())
 
         cpuHistory.append(sample.totalUsed)
-        if cpuHistory.count > 30 { cpuHistory.removeFirst() }
+        if cpuHistory.count > 60 { cpuHistory.removeFirst() }
+        samplePerCoreLoads()
 
         var avg = [Double](repeating: 0, count: 3)
         if getloadavg(&avg, 3) == 3 {
@@ -231,6 +251,12 @@ final class SystemMonitor: ObservableObject {
         readSwap()
         readDisk()
         readNetwork()
+        netInHistory.append(netIn)
+        if netInHistory.count > 60 { netInHistory.removeFirst() }
+        netOutHistory.append(netOut)
+        if netOutHistory.count > 60 { netOutHistory.removeFirst() }
+        peakNetIn = max(1024, netInHistory.max() ?? 1024)
+        peakNetOut = max(1024, netOutHistory.max() ?? 1024)
         readSelfResources()
         menuBarTick &+= 1
     }
@@ -405,6 +431,51 @@ final class SystemMonitor: ObservableObject {
         )
     }
 
+    private func samplePerCoreLoads() {
+        var numCPUsU: natural_t = 0
+        var cpuInfo: processor_info_array_t?
+        var numCpuInfo: mach_msg_type_number_t = 0
+        let kr = host_processor_info(
+            mach_host_self(),
+            PROCESSOR_CPU_LOAD_INFO,
+            &numCPUsU,
+            &cpuInfo,
+            &numCpuInfo
+        )
+        guard kr == KERN_SUCCESS, let info = cpuInfo else { return }
+        defer {
+            let size = vm_size_t(Int(numCpuInfo) * MemoryLayout<integer_t>.stride)
+            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: info), size)
+        }
+
+        let count = Int(numCPUsU)
+        var current: [(user: Double, system: Double, idle: Double)] = []
+        current.reserveCapacity(count)
+        var loads: [Double] = []
+        loads.reserveCapacity(count)
+
+        for i in 0..<count {
+            let base = Int(CPU_STATE_MAX) * i
+            let u = Double(info[base + Int(CPU_STATE_USER)]) + Double(info[base + Int(CPU_STATE_NICE)])
+            let s = Double(info[base + Int(CPU_STATE_SYSTEM)])
+            let id = Double(info[base + Int(CPU_STATE_IDLE)])
+            current.append((u, s, id))
+
+            if prevCoreTicks.count == count {
+                let p = prevCoreTicks[i]
+                let du = u - p.user
+                let ds = s - p.system
+                let did = id - p.idle
+                let tot = du + ds + did
+                loads.append(tot > 0 ? min(max((du + ds) / tot, 0), 1) : 0)
+            } else {
+                loads.append(cpu)
+            }
+        }
+        prevCoreTicks = current
+        coreLoads = loads
+    }
+
     private func readMemory() {
         var stats = vm_statistics64()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
@@ -417,6 +488,7 @@ final class SystemMonitor: ObservableObject {
         let page = Double(sysconf(_SC_PAGESIZE))
         let purgeable = Double(stats.purgeable_count) * page
         let external = Double(stats.external_page_count) * page
+        let free = Double(stats.free_count) * page
         let app = max(0, (Double(stats.internal_page_count) - Double(stats.purgeable_count)) * page)
         let wired = Double(stats.wire_count) * page
         let compressed = Double(stats.compressor_page_count) * page
@@ -425,6 +497,9 @@ final class SystemMonitor: ObservableObject {
         memWired = wired
         memCompressed = compressed
         memCached = purgeable + external
+        memFree = free
+        pageIns = stats.pageins
+        pageOuts = stats.pageouts
         memoryUsed = max(0, app + wired + compressed)
     }
 
@@ -433,16 +508,29 @@ final class SystemMonitor: ObservableObject {
         var size = MemoryLayout<xsw_usage>.size
         if sysctlbyname("vm.swapusage", &swap, &size, nil, 0) == 0 {
             swapUsed = Double(swap.xsu_used)
+            swapTotal = Double(swap.xsu_total)
         }
     }
 
     private func readDisk() {
         let url = URL(fileURLWithPath: "/")
-        if let v = try? url.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey]),
+        let keys: Set<URLResourceKey> = [
+            .volumeTotalCapacityKey,
+            .volumeAvailableCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeNameKey,
+            .volumeLocalizedFormatDescriptionKey
+        ]
+        if let v = try? url.resourceValues(forKeys: keys),
            let total = v.volumeTotalCapacity {
-            let avail = Double(v.volumeAvailableCapacityForImportantUsage ?? 0)
+            let availImportant = Double(v.volumeAvailableCapacityForImportantUsage ?? 0)
+            let availImmediate = Double(v.volumeAvailableCapacity ?? Int(availImportant))
             diskTotal = Double(total)
-            diskUsed = max(0, Double(total) - avail)
+            diskFreeImmediate = max(0, availImmediate)
+            diskPurgeable = max(0, availImportant - availImmediate)
+            diskUsed = max(0, Double(total) - availImportant)
+            if let name = v.volumeName, !name.isEmpty { volumeName = name }
+            if let fmt = v.volumeLocalizedFormatDescription, !fmt.isEmpty { fileSystemFormat = fmt }
         }
     }
 
@@ -453,6 +541,7 @@ final class SystemMonitor: ObservableObject {
         var inB: UInt64 = 0, outB: UInt64 = 0
         var detectedIP: String?
         var detectedIF: String?
+        var hasVPN = false
 
         var ptr: UnsafeMutablePointer<ifaddrs>? = first
         while let p = ptr {
@@ -475,12 +564,17 @@ final class SystemMonitor: ObservableObject {
                         }
                     }
                 }
+            } else if name.hasPrefix("utun") || name.hasPrefix("ppp") || name.hasPrefix("ipsec") {
+                if let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
+                    hasVPN = true
+                }
             }
             ptr = ifa.ifa_next
         }
 
         totalNetIn = inB
         totalNetOut = outB
+        vpnTunnelActive = hasVPN
         if let detectedIP { localIP = detectedIP }
         if let detectedIF { activeInterface = detectedIF }
 
@@ -493,5 +587,20 @@ final class SystemMonitor: ObservableObject {
             }
         }
         prevNet = (inB, outB, now)
+    }
+
+    nonisolated private static func readSysctlString(_ key: String) -> String? {
+        var size: Int = 0
+        guard sysctlbyname(key, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(key, &buf, &size, nil, 0) == 0 else { return nil }
+        return String(cString: buf).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func readSysctlInt(_ key: String) -> Int {
+        var val: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname(key, &val, &size, nil, 0) == 0 else { return 0 }
+        return Int(val)
     }
 }

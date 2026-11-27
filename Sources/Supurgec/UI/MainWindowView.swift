@@ -9,6 +9,7 @@ struct MainWindowView: View {
     @StateObject private var optimization: OptimizationModel
     @StateObject private var maintenance: MaintenanceModel
     @StateObject private var smartScan: SmartScanModel
+    @StateObject private var resourceInspector = ResourceInspectorModel()
     @ObservedObject private var monitor = SystemMonitor.shared
 
     init() {
@@ -21,7 +22,7 @@ struct MainWindowView: View {
         _smartScan = StateObject(wrappedValue: SmartScanModel(junkScanner: junk, optimization: opt, maintenance: maint))
     }
 
-    private let sections = ["Genel", "Temizlik", "Hız", "Uygulamalar", "Tercihler"]
+    private let sections = ["Genel", "Canlı İzleyici", "Temizlik", "Hız", "Uygulamalar", "Tercihler"]
 
     var body: some View {
         ZStack {
@@ -252,10 +253,25 @@ struct MainWindowView: View {
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(mod.primaryAccent.opacity(0.55)))
+                } else if mod == .memoryMonitor {
+                    Text(String(format: "%%%.0f", monitor.memoryRatio * 100))
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(active ? .white : Theme.subtleText)
+                        .monospacedDigit()
+                } else if mod == .cpuMonitor {
+                    Text("%\(monitor.cpuPercentInt)")
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(active ? .white : Theme.subtleText)
+                        .monospacedDigit()
+                } else if mod == .diskMonitor {
+                    Text("\((monitor.diskTotal - monitor.diskUsed).formattedBytes)")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(active ? .white : Theme.faintText)
+                        .monospacedDigit()
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.vertical, 6)
             .background(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(active ? Color.white.opacity(0.13) : .clear)
@@ -273,11 +289,20 @@ struct MainWindowView: View {
 
     @ViewBuilder
     private var detailContent: some View {
+        let nav: (NavModule) -> Void = { target in
+            withAnimation(.easeOut(duration: 0.2)) { selectedModule = target }
+        }
         switch selectedModule {
         case .smartScan:
-            SmartScanView(model: smartScan) { target in
-                withAnimation(.easeOut(duration: 0.2)) { selectedModule = target }
-            }
+            SmartScanView(model: smartScan, onNavigate: nav)
+        case .memoryMonitor:
+            MemoryMonitorDetailView(inspector: resourceInspector, onNavigate: nav)
+        case .cpuMonitor:
+            CPUMonitorDetailView(inspector: resourceInspector, onNavigate: nav)
+        case .diskMonitor:
+            DiskMonitorDetailView(inspector: resourceInspector, onNavigate: nav)
+        case .networkMonitor:
+            NetworkMonitorDetailView(inspector: resourceInspector, onNavigate: nav)
         case .systemJunk:
             SystemJunkView(scanner: junkScanner)
         case .uninstaller:
