@@ -402,9 +402,14 @@ actor FullProcessSampler {
         let clean = s.replacingOccurrences(of: ",", with: ".")
         let cols = clean.split(separator: ":")
         if cols.count == 2 {
-            return (Double(cols[0]) ?? 0) * 60.0 + (Double(cols[1]) ?? 0)
+            let mins = Double(cols[0]) ?? 0
+            let secs = Double(cols[1]) ?? 0
+            return mins * 60.0 + secs
         } else if cols.count == 3 {
-            return (Double(cols[0]) ?? 0) * 3600.0 + (Double(cols[1]) ?? 0) * 60.0 + (Double(cols[2]) ?? 0)
+            let hrs = Double(cols[0]) ?? 0
+            let mins = Double(cols[1]) ?? 0
+            let secs = Double(cols[2]) ?? 0
+            return hrs * 3600.0 + mins * 60.0 + secs
         }
         return Double(clean) ?? 0
     }

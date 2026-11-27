@@ -37,6 +37,7 @@ struct ProcessItem: Identifiable {
     let allPIDs: [Int32]
     let name: String
     let subtitle: String
+    let bundlePath: String?
     let cpu: Double          // Tüm Mac kapasitesine göre gerçek %0..%100 CPU payı
     let memoryMB: Double
     let helperCount: Int
@@ -243,21 +244,18 @@ actor ProcessSampler {
                 subtitle = "Çalışan uygulama"
             }
 
-            let icon: NSImage? = await MainActor.run {
-                b.appBundlePath.map { NSWorkspace.shared.icon(forFile: $0) }
-            }
-
             result.append(ProcessItem(
                 pid: b.rootPID,
                 allPIDs: b.pids,
                 name: b.name,
                 subtitle: subtitle,
+                bundlePath: b.appBundlePath,
                 cpu: finalCPU,
                 memoryMB: memMB,
                 helperCount: b.pids.count,
                 isSystemDaemon: b.isSystemDaemon,
                 isSystemCritical: b.isCritical,
-                icon: icon
+                icon: nil
             ))
         }
 
@@ -367,7 +365,11 @@ final class OptimizationModel: ObservableObject {
         let runningMap = Self.buildRunningAppsMap()
         Task {
             let items = await ProcessSampler.shared.sampleGrouped(runningApps: runningMap, forceFreshWindow: manual)
-            self.processes = items
+            self.processes = items.map { item in
+                var copy = item
+                copy.icon = item.bundlePath.map { NSWorkspace.shared.icon(forFile: $0) }
+                return copy
+            }
             self.refreshingProcesses = false
             if manual {
                 SystemMonitor.shared.endTask("✓ İşlemci analizi güncellendi")

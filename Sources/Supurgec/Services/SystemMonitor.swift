@@ -281,7 +281,7 @@ final class SystemMonitor: ObservableObject {
                     subtitle: g.helperCount > 1 ? "\(g.helperCount) süreç toplamı" : "",
                     cpu: g.cpu,
                     memoryBytes: Int64(g.memoryMB * 1024 * 1024),
-                    icon: g.icon
+                    icon: g.bundlePath.map { NSWorkspace.shared.icon(forFile: $0) }
                 )
             }
 
