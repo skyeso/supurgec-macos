@@ -525,7 +525,7 @@ struct SettingsView: View {
         GlassCard(padding: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Süpürgeç · Sürüm 0.1 Alpha")
+                    Text("Süpürgeç · Sürüm 0.2 Alpha")
                         .font(.system(size: 13.5, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                     Text("Ensar Gemici katkılarıyla geliştirilmiştir.")
