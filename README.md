@@ -1,6 +1,6 @@
 # Süpürgeç — macOS Bakım, Temizlik ve Sistem Stüdyosu
 
-> **Alpha Sürüm 0.1** · *Ensar Gemici katkılarıyla*
+
 
 CleanMyMac tarzı koyu arayüze sahip, arka planda sıfıra yakın kaynak tüketen yerel (**SwiftUI + AppKit**) macOS bakım, optimizasyon ve sistem izleme uygulaması.
 
