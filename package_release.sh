@@ -7,7 +7,7 @@ if [ ! -d "build/Süpürgeç.app" ]; then
   ./build.sh
 fi
 
-VERSION="v0.3-alpha"
+VERSION="v0.4-alpha"
 ZIP_OUT="build/Supurgec-${VERSION}-macOS.zip"
 DMG_OUT="build/Supurgec-${VERSION}-macOS.dmg"
 STAGE="build/dmg_stage"

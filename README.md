@@ -27,7 +27,7 @@ brew tap skyeso/tap && brew trust skyeso/tap && brew install --cask skyeso/tap/s
 Güncellemek için `brew upgrade --cask supurgec`, kaldırmak için `brew uninstall --cask supurgec` komutunu kullanabilirsiniz.
 
 ### Yöntem 2: Hazır DMG Paketi ile Elle Kurulum (Derleme Gerekmez)
-1. Bu deponun **Releases** sayfasından en güncel `Supurgec-v0.1-alpha-macOS.dmg` (veya `.zip`) dosyasını indirin.
+1. Bu deponun **Releases** sayfasından en güncel `Supurgec-v0.4-alpha-macOS.dmg` (veya `.zip`) dosyasını indirin.
 2. `.dmg` dosyasını açıp **Süpürgeç** simgesini **Applications (Uygulamalar)** klasörüne sürükleyin.
 3. Apple Developer sertifikası olmadan yerel imzalandığı için ilk açılışta macOS Gatekeeper uyarısı çıkarsa Terminal'de bir kez şu komutu çalıştırın:
 

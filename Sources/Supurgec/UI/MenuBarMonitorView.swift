@@ -360,7 +360,7 @@ struct MenuBarMonitorView: View {
 
     private var memoryTile: some View {
         let ratio = monitor.memoryRatio
-        let tint: Color = monitor.swapUsed > 512 * 1024 * 1024 || ratio > 0.88 ? .pink : (ratio > 0.75 ? .orange : Theme.successGreen)
+        let tint: Color = monitor.memoryPressureTint
         return VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 4) {
                 Image(systemName: "memorychip")
@@ -524,8 +524,9 @@ struct MenuBarMonitorView: View {
     // MARK: - 1. Bellek Detay Ekranı (Üst Başlık Sabit + İçerik Kaydırılabilir!)
 
     private var memoryDetailView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            detailHeader(title: "Bellek (RAM)", icon: "memorychip", tint: Theme.successGreen) {
+        let pressureTint = monitor.memoryPressureTint
+        return VStack(alignment: .leading, spacing: 10) {
+            detailHeader(title: "Bellek (RAM)", icon: "memorychip", tint: pressureTint) {
                 Button {
                     freeRAM()
                 } label: {
@@ -537,7 +538,7 @@ struct MenuBarMonitorView: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(Capsule().fill(Theme.successGreen.opacity(0.35)))
+                            .background(Capsule().fill(pressureTint.opacity(0.35)))
                     }
                 }
                 .buttonStyle(.plain)
@@ -552,11 +553,11 @@ struct MenuBarMonitorView: View {
                                 .font(.system(size: 16, weight: .bold, design: .rounded))
                                 .foregroundStyle(.white)
                             Spacer()
-                            Text(monitor.swapUsed < 64 * 1024 * 1024 ? "Baskı: Düşük (Sağlıklı)" : "Takas: \(monitor.swapUsed.formattedMemory)")
+                            Text(monitor.memoryPressureBadgeText)
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(monitor.swapUsed < 64 * 1024 * 1024 ? Theme.successGreen : .orange)
+                                .foregroundStyle(pressureTint)
                         }
-                        Text("macOS hız için boş belleği dosya önbelleği olarak hazır tutar. Takas \(monitor.swapUsed.formattedMemory) iken bellek darlığı yoktur.")
+                        Text(monitor.memoryPressureShortDescription)
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.subtleText)
                             .fixedSize(horizontal: false, vertical: true)

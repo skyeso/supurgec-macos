@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 import Darwin
 
 struct TopConsumer: Identifiable {
@@ -107,7 +108,84 @@ final class SystemMonitor: ObservableObject {
     @Published var speedTestError: String?
 
     var memoryRatio: Double { memoryTotal > 0 ? memoryUsed / memoryTotal : 0 }
+    var compressedRatio: Double { memoryTotal > 0 ? memCompressed / memoryTotal : 0 }
     var diskRatio: Double { diskTotal > 0 ? diskUsed / diskTotal : 0 }
+
+    enum MemoryPressureState {
+        case low
+        case moderate
+        case high
+    }
+
+    var memoryPressureState: MemoryPressureState {
+        let ratio = memoryRatio
+        let compRatio = compressedRatio
+        if swapUsed > 1.5 * 1024 * 1024 * 1024 || ratio >= 0.88 || compRatio >= 0.35 {
+            return .high
+        } else if swapUsed > 128 * 1024 * 1024 || ratio >= 0.72 || compRatio >= 0.20 {
+            return .moderate
+        }
+        return .low
+    }
+
+    var memoryPressureTint: Color {
+        switch memoryPressureState {
+        case .low: return Theme.successGreen
+        case .moderate: return .orange
+        case .high: return .pink
+        }
+    }
+
+    var memoryPressureBadgeText: String {
+        switch memoryPressureState {
+        case .low:
+            return "Baskı: Düşük (Sağlıklı)"
+        case .moderate:
+            if swapUsed >= 64 * 1024 * 1024 {
+                return "Baskı: Orta (Takas: \(swapUsed.formattedMemory))"
+            }
+            return "Baskı: Orta (Yoğun)"
+        case .high:
+            if swapUsed >= 64 * 1024 * 1024 {
+                return "Baskı: Yüksek (Takas: \(swapUsed.formattedMemory))"
+            }
+            return "Baskı: Yüksek (Sıkışık)"
+        }
+    }
+
+    var memoryPressureShortDescription: String {
+        switch memoryPressureState {
+        case .low:
+            return "macOS hız için boş belleği dosya önbelleği olarak hazır tutar. Takas \(swapUsed.formattedMemory) iken bellek alanı gayet rahattır."
+        case .moderate:
+            return "RAM kullanımı yüksek (%\(Int((memoryRatio * 100).rounded()))). macOS yer açmak için \(memCompressed.formattedMemory) belleği sıkıştırıyor\(swapUsed >= 64 * 1024 * 1024 ? " ve \(swapUsed.formattedMemory) takas kullanıyor" : "")."
+        case .high:
+            return "Fiziksel RAM sınırına yaklaşıldı (%\(Int((memoryRatio * 100).rounded())) dolu, \(memCompressed.formattedMemory) sıkıştırılmış). RAM boşaltmanız veya ağır uygulamaları kapatmanız önerilir."
+        }
+    }
+
+    var memoryPressureDetailInfo: (label: String, color: Color, summary: String) {
+        switch memoryPressureState {
+        case .low:
+            return (
+                "Sağlıklı · Düşük Baskı",
+                Theme.successGreen,
+                "Bellek alanı gayet rahat. macOS boşta kalan RAM'i dosya önbelleği olarak değerlendirip uygulamalarınızın anında açılmasını sağlıyor."
+            )
+        case .moderate:
+            return (
+                "Dengeli · Orta Yoğunluk",
+                .orange,
+                "RAM doluluk oranı yüksek ve macOS çoklu görevi dengelemek için \(memCompressed.formattedMemory) pasif belleği sıkıştırıyor\(swapUsed >= 64 * 1024 * 1024 ? " (Takas: \(swapUsed.formattedMemory))" : ""). Ağır işlerde RAM boşaltabilirsiniz."
+            )
+        case .high:
+            return (
+                "Yüksek Bellek Baskısı",
+                .pink,
+                "Fiziksel RAM yoğun dolu (\(memCompressed.formattedMemory) sıkıştırılmış\(swapUsed >= 64 * 1024 * 1024 ? ", \(swapUsed.formattedMemory) SSD takas" : "")). Kullanmadığınız ağır uygulamaları kapatmanız veya RAM boşaltmanız hız kazandırır."
+            )
+        }
+    }
 
     private var activeTaskStack: [String] = []
     private var clearBannerTask: Task<Void, Never>?
@@ -222,6 +300,7 @@ final class SystemMonitor: ObservableObject {
         }
         if settings.showRAM {
             readMemory()
+            readSwap()
             changed = true
         }
         if settings.showNetwork {

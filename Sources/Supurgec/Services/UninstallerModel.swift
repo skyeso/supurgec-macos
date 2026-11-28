@@ -15,6 +15,7 @@ struct AppInfo: Identifiable, Equatable {
     let url: URL
     let name: String
     let bundleID: String
+    let executableName: String
     let version: String
     let privilegedHelpers: [String]
     let embeddedBundleIDs: [String]
@@ -210,8 +211,11 @@ final class UninstallerModel: ObservableObject {
                 }
             }.value
 
-            // 3. Tercih önbelleklerini (cfprefsd) hem ana hem gömülü bundle ID'ler için sıfırla
-            let allIDs = ([app.bundleID] + app.embeddedBundleIDs).filter { !$0.isEmpty }
+            // 3. Tercih önbelleklerini (cfprefsd) hem ana/gömülü bundle ID'ler hem de bulunan ekstra tercih plist'leri için sıfırla
+            let prefDomains = appLeftovers
+                .filter { $0.url.path.contains("/Library/Preferences/") && $0.url.pathExtension.lowercased() == "plist" }
+                .map { ($0.url.lastPathComponent as NSString).deletingPathExtension }
+            let allIDs = Array(Set(([app.bundleID] + app.embeddedBundleIDs + prefDomains).filter { !$0.isEmpty }))
             await Task.detached {
                 for bid in allIDs {
                     _ = Shell.run("/usr/bin/defaults", ["delete", bid])
@@ -408,6 +412,9 @@ final class UninstallerModel: ObservableObject {
             let bundle = Bundle(url: u)
             let info = bundle?.infoDictionary ?? [:]
             let bundleID = bundle?.bundleIdentifier ?? ""
+            let executableName = (info["CFBundleExecutable"] as? String)
+                ?? bundle?.executableURL?.lastPathComponent
+                ?? ""
             let rawDisplay = FileManager.default.displayName(atPath: u.path).replacingOccurrences(of: ".app", with: "")
             let version = info["CFBundleShortVersionString"] as? String ?? ""
 
@@ -431,6 +438,7 @@ final class UninstallerModel: ObservableObject {
                 url: u,
                 name: rawDisplay,
                 bundleID: bundleID,
+                executableName: executableName,
                 version: version,
                 privilegedHelpers: Array(Set(helpers)),
                 embeddedBundleIDs: embeddedIDs,
@@ -477,6 +485,7 @@ final class UninstallerModel: ObservableObject {
             (sysLib.appendingPathComponent("Caches"), "Sistem Önbelleği", true, true),
             (sysLib.appendingPathComponent("Preferences"), "Sistem Tercihi", true, false),
             (sysLib.appendingPathComponent("Logs"), "Sistem Günlüğü", true, true),
+            (sysLib.appendingPathComponent("Logs/DiagnosticReports"), "Sistem Çökme Raporu", true, false),
             (sysLib.appendingPathComponent("LaunchAgents"), "Başlangıç Servisi (Tüm Kullanıcılar)", true, false),
             (sysLib.appendingPathComponent("LaunchDaemons"), "Arka Plan Sistem Servisi (Daemon)", true, false),
             (sysLib.appendingPathComponent("PrivilegedHelperTools"), "Yetkili Yardımcı Araç (Helper)", true, false),
@@ -490,11 +499,14 @@ final class UninstallerModel: ObservableObject {
 
         let bid = app.bundleID.lowercased()
         let allKnownBundleIDs = Set(([bid] + app.embeddedBundleIDs.map { $0.lowercased() }).filter { $0.count > 5 })
+        let otherBundleIDs = Set(allInstalledApps.filter { $0.id != app.id }.map { $0.bundleID.lowercased() }.filter { !$0.isEmpty })
         let appPathPrefix = app.url.path.lowercased() + "/"
         let bundleName = ((app.url.lastPathComponent as NSString).deletingPathExtension).lowercased()
         let displayName = app.name.lowercased()
+        let execName = app.executableName.lowercased()
         let normDisplay = normalizeToken(displayName)
         let normBundleName = normalizeToken(bundleName)
+        let normExec = normalizeToken(execName)
         let helperIDs = Set(app.privilegedHelpers.map { $0.lowercased() })
 
         let bidParts = bid.split(separator: ".").map(String.init)
@@ -540,10 +552,49 @@ final class UninstallerModel: ObservableObject {
             return false
         }
 
-        func matchesCandidate(fileName: String, fullURL: URL, isLaunchPlistDir: Bool) -> Bool {
+        func diagnosticReportBelongsToApp(fileName: String, fullURL: URL) -> Bool {
+            let lower = fileName.lowercased()
+            var candidateExecs: [String] = []
+            if execName.count >= 2 && !genericWords.contains(execName) {
+                candidateExecs.append(execName)
+            }
+            if displayName.count >= 3 && !genericWords.contains(displayName) {
+                candidateExecs.append(displayName)
+            }
+            if bundleName.count >= 3 && !genericWords.contains(bundleName) {
+                candidateExecs.append(bundleName)
+            }
+
+            let prefixMatched = candidateExecs.contains { ex in
+                lower.hasPrefix(ex + "_") || lower.hasPrefix(ex + "-") || lower.hasPrefix(ex + ".")
+            }
+            guard prefixMatched else { return false }
+
+            // Rapor dosyası okunabiliyorsa içindeki procPath / bundleID ile kesin doğrulama yap;
+            // çok kısa executable adlarında (<= 3 karakter) başka bir uygulamayla çakışmayı önle.
+            if let handle = try? FileHandle(forReadingFrom: fullURL) {
+                let data = (try? handle.read(upToCount: 4096)) ?? Data()
+                try? handle.close()
+                if !data.isEmpty, let head = String(data: data, encoding: .utf8)?.lowercased() {
+                    if head.contains(app.url.path.lowercased()) || (!bid.isEmpty && head.contains(bid)) {
+                        return true
+                    }
+                    if head.contains("\"procpath\"") || head.contains("path:") {
+                        return false
+                    }
+                }
+            }
+            return true
+        }
+
+        func matchesCandidate(fileName: String, fullURL: URL, isLaunchPlistDir: Bool, isDiagnosticDir: Bool) -> Bool {
             let lower = fileName.lowercased()
             let stem = (lower as NSString).deletingPathExtension
             let normStem = normalizeToken(stem)
+
+            if isDiagnosticDir && diagnosticReportBelongsToApp(fileName: fileName, fullURL: fullURL) {
+                return true
+            }
 
             if isLaunchPlistDir && plistPointsToApp(fullURL) {
                 return true
@@ -572,19 +623,27 @@ final class UninstallerModel: ObservableObject {
                 }
             }
 
-            for candidate in Set([normDisplay, normBundleName]) where candidate.count >= 4 && !genericWords.contains(candidate) {
+            for candidate in Set([normDisplay, normBundleName, normExec]) where candidate.count >= 4 && !genericWords.contains(candidate) {
                 if normStem == candidate {
                     return true
                 }
-                if candidate.count >= 6 && (
-                    lower.hasPrefix(displayName + "_") ||
-                    lower.hasPrefix(displayName + "-") ||
-                    lower.hasPrefix(displayName + " ") ||
-                    lower.hasPrefix(bundleName + "_") ||
-                    lower.hasPrefix(bundleName + "-") ||
-                    lower.hasPrefix(bundleName + ".app-")
-                ) {
-                    return true
+                if candidate.count >= 6 {
+                    if lower.hasPrefix(displayName + "_") ||
+                        lower.hasPrefix(displayName + "-") ||
+                        lower.hasPrefix(displayName + " ") ||
+                        lower.hasPrefix(bundleName + "_") ||
+                        lower.hasPrefix(bundleName + "-") ||
+                        lower.hasPrefix(bundleName + ".app-") ||
+                        (execName.count >= 4 && (lower.hasPrefix(execName + "_") || lower.hasPrefix(execName + "-"))) {
+                        return true
+                    }
+                    // Ters alan adı + uygulama adı kalıbı (örn. com.softdeluxe.Free Download Manager.plist)
+                    if !otherBundleIDs.contains(stem) {
+                        let dotSegments = stem.split(separator: ".").dropFirst()
+                        if dotSegments.contains(where: { normalizeToken(String($0)) == candidate }) {
+                            return true
+                        }
+                    }
                 }
             }
 
@@ -609,12 +668,24 @@ final class UninstallerModel: ObservableObject {
 
         for loc in locations {
             let isLaunchDir = loc.url.path.hasSuffix("/LaunchAgents") || loc.url.path.hasSuffix("/LaunchDaemons")
+            let isDiagnosticDir = loc.url.path.hasSuffix("/DiagnosticReports")
             for child in FileUtils.children(of: loc.url) {
                 let name = child.lastPathComponent
                 if name == ".DS_Store" || name == ".localized" { continue }
 
-                if matchesCandidate(fileName: name, fullURL: child, isLaunchPlistDir: isLaunchDir) {
+                if matchesCandidate(fileName: name, fullURL: child, isLaunchPlistDir: isLaunchDir, isDiagnosticDir: isDiagnosticDir) {
                     appendItem(child, kind: loc.kind, admin: loc.admin)
+                    continue
+                }
+
+                // DiagnosticReports/Retired alt klasöründeki eski çökme raporlarını da tara
+                if isDiagnosticDir && name == "Retired" && FileUtils.isDirectory(child) {
+                    for retiredChild in FileUtils.children(of: child) {
+                        let rName = retiredChild.lastPathComponent
+                        if matchesCandidate(fileName: rName, fullURL: retiredChild, isLaunchPlistDir: false, isDiagnosticDir: true) {
+                            appendItem(retiredChild, kind: loc.kind, admin: loc.admin)
+                        }
+                    }
                     continue
                 }
 
@@ -632,7 +703,7 @@ final class UninstallerModel: ObservableObject {
                         let matchingSubs = subChildren.filter { sub in
                             let subLow = sub.lastPathComponent.lowercased()
                             let subNorm = normalizeToken((subLow as NSString).deletingPathExtension)
-                            if matchesCandidate(fileName: sub.lastPathComponent, fullURL: sub, isLaunchPlistDir: false) { return true }
+                            if matchesCandidate(fileName: sub.lastPathComponent, fullURL: sub, isLaunchPlistDir: false, isDiagnosticDir: false) { return true }
                             if let prod = bidParts.last, prod.count >= 4 && !genericWords.contains(prod) {
                                 if subNorm == normalizeToken(prod) || subNorm == normDisplay { return true }
                             }

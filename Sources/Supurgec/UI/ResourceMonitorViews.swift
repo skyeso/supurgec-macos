@@ -147,25 +147,7 @@ struct MemoryMonitorDetailView: View {
     @ViewState private var ramFeedback: String?
 
     private var pressureInfo: (label: String, color: Color, summary: String) {
-        let ratio = monitor.memoryRatio
-        if monitor.swapUsed > 1.5 * 1024 * 1024 * 1024 || ratio > 0.90 {
-            return (
-                "Yüksek Bellek Baskısı",
-                .pink,
-                "Fiziksel RAM yoğun dolu ve SSD üzerinde takas (swap) aktif kullanılıyor. Kullanmadığınız ağır uygulamaları kapatmanız veya RAM boşaltmanız hız kazandırır."
-            )
-        } else if monitor.swapUsed > 256 * 1024 * 1024 || ratio > 0.76 {
-            return (
-                "Dengeli · Orta Yoğunluk",
-                .orange,
-                "macOS pasif bellek sayfalarını sıkıştırarak çoklu görevi dengeliyor. Günlük kullanımda herhangi bir yavaşlama beklenmez."
-            )
-        }
-        return (
-            "Sağlıklı · Düşük Baskı",
-            Theme.successGreen,
-            "Bellek alanı gayet rahat. macOS boşta kalan RAM'i dosya önbelleği olarak değerlendirip uygulamalarınızın anında açılmasını sağlıyor."
-        )
+        monitor.memoryPressureDetailInfo
     }
 
     private var filteredGroups: [DetailedProcessGroup] {
